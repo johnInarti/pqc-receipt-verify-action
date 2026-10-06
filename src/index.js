@@ -11,6 +11,7 @@ import { verifyReceipt } from './verify.js';
 
 const DEFAULT_DIRECTORY = 'https://fractalai.net.co/.well-known/x402-receipt-keys';
 const FETCH_TIMEOUT_MS = 20_000;
+const FETCH_ATTEMPTS = 3;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 function getInput(name) {
@@ -41,7 +42,21 @@ async function fetchJson(url) {
   if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname))) {
     throw new Error(`refusing non-HTTPS URL ${url}`);
   }
-  const res = await fetch(u, { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/1' }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: 'error' });
+  // Up to 3 attempts for transient network errors / 5xx / 429. A 4xx is final. Never retries into "valid":
+  // if every attempt fails, the caller reports valid=false (fail-closed).
+  let res;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      res = await fetch(u, { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/1' }, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), redirect: 'error' });
+      if (res.ok || (res.status < 500 && res.status !== 429) || attempt >= FETCH_ATTEMPTS) break;
+    } catch (e) {
+      if (attempt >= FETCH_ATTEMPTS) {
+        const cause = e && e.cause ? ` (${e.cause.code || e.cause.message || e.cause})` : '';
+        throw new Error(`GET ${url} failed after ${attempt} attempts: ${e instanceof Error ? e.message : String(e)}${cause}`);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+  }
   if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
   const text = await res.text();
   if (text.length > MAX_BODY_BYTES) throw new Error(`GET ${url} -> body larger than ${MAX_BODY_BYTES} bytes`);
