@@ -1,0 +1,22 @@
+{
+  "name": "pqc-receipt-verify-action",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "GitHub Action: verify FractalAI post-quantum (ML-DSA-65 / FIPS 204) signed receipts, fail-closed on tampering or untrusted keys.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build src/index.js -o dist --license licenses.txt",
+    "test": "node --test test/*.test.mjs",
+    "all": "npm run build && npm test"
+  },
+  "engines": { "node": ">=20" },
+  "license": "Apache-2.0",
+  "author": "FRACTAL AI S.A.S. <softnextceo@gmail.com>",
+  "dependencies": {
+    "@noble/post-quantum": "^0.6.1"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.3"
+  }
+}

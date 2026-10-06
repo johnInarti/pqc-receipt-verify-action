@@ -1,0 +1,38 @@
+name: 'FractalAI PQC Receipt Verify'
+description: 'Verify FractalAI post-quantum (ML-DSA-65 / FIPS 204) signed receipts. Fail-closed: fails on tampering or untrusted keys.'
+author: 'FRACTAL AI S.A.S.'
+branding:
+  icon: 'shield'
+  color: 'purple'
+inputs:
+  receipt:
+    description: 'Path to a receipt JSON file in the workspace, a 64-hex receipt id (fetched from <key-directory origin>/api/midas/alerts/receipt/<id>), or an https URL to a receipt JSON.'
+    required: true
+  key-directory:
+    description: 'Key directory (FRACTALAI-key-directory-v1): https URL or path to a JSON file. Its ML-DSA-65 governance signature and root are verified; it is used only when trusted-keys is empty.'
+    required: false
+    default: 'https://fractalai.net.co/.well-known/x402-receipt-keys'
+  trusted-keys:
+    description: 'Optional pinned trust set: base64 ML-DSA-65 public keys separated by newlines/commas, or a path to a file containing them. When set, the key directory is NOT consulted and only these keys are trusted.'
+    required: false
+    default: ''
+  governance-key:
+    description: 'Optional base64 ML-DSA-65 public key that must have signed the key directory (pins the directory signer instead of trusting TLS).'
+    required: false
+    default: ''
+  fail-on-invalid:
+    description: 'Fail the step when the receipt is not valid (true/false).'
+    required: false
+    default: 'true'
+outputs:
+  valid:
+    description: '"true" only if every integrity check passed, the ML-DSA-65 signature verifies AND the key is trusted (pinned, or active/retiring-in-window in the verified directory). Otherwise "false".'
+  kid:
+    description: 'Key id of the signing key: sha256(public_key_b64)[:16]. Empty if the receipt failed before the signature check.'
+  epoch:
+    description: 'Epoch of the key directory used (empty when trusted-keys was used).'
+  reason:
+    description: 'Human-readable reason for the verdict.'
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

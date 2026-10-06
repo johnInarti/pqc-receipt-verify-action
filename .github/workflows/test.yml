@@ -1,0 +1,87 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1' # weekly: catch key-directory rotations that would break the live check
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: dist/ is up to date with src/
+        run: |
+          npm run build
+          git diff --exit-code -- dist/ || { echo "::error::dist/ is stale — run 'npm run build' and commit"; exit 1; }
+
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Real receipt by id (live key directory)
+        id: live
+        uses: ./
+        with:
+          receipt: fe62b072c2740e7a8d10cf7e643905b7d79f3f9b19f1c3970fc8754f18d538ee
+
+      - name: Assert real receipt is valid
+        env:
+          VALID: ${{ steps.live.outputs.valid }}
+          KID: ${{ steps.live.outputs.kid }}
+          EPOCH: ${{ steps.live.outputs.epoch }}
+        run: |
+          echo "valid=$VALID kid=$KID epoch=$EPOCH"
+          test "$VALID" = "true"
+          test "$KID" = "86c139c960bb274c"
+          test -n "$EPOCH"
+
+      - name: Real receipt from file, pinned trusted key (offline trust)
+        id: pinned
+        uses: ./
+        with:
+          receipt: test/vectors/genuine-fe62b072.json
+          trusted-keys: test/vectors/trusted-keys.txt
+
+      - name: Assert pinned verification is valid
+        run: test "${{ steps.pinned.outputs.valid }}" = "true"
+
+      - name: Tampered vector (must fail)
+        id: tampered
+        continue-on-error: true
+        uses: ./
+        with:
+          receipt: test/vectors/tampered-fe62b072.json
+
+      - name: Assert tampered vector was rejected
+        env:
+          OUTCOME: ${{ steps.tampered.outcome }}
+          VALID: ${{ steps.tampered.outputs.valid }}
+          REASON: ${{ steps.tampered.outputs.reason }}
+        run: |
+          echo "outcome=$OUTCOME valid=$VALID reason=$REASON"
+          test "$OUTCOME" = "failure"
+          test "$VALID" = "false"
+
+      - name: Tampered vector with fail-on-invalid=false (step passes, output false)
+        id: soft
+        uses: ./
+        with:
+          receipt: test/vectors/tampered-fe62b072.json
+          fail-on-invalid: 'false'
+
+      - name: Assert soft mode
+        run: test "${{ steps.soft.outputs.valid }}" = "false"
