@@ -21,7 +21,7 @@ Cuando decidas publicar (es versión MAYOR: los usuarios de `@v1` no cambian sol
 ```bash
 git checkout main && git merge --ff-only v2      # o abre un PR desde la rama v2
 git push origin main                              # el workflow test.yml debe salir verde
-git tag -a v2.0.0 -m "v2.0.0 — Trust Kernel v2 (vendored dab77b0), leveled verdict, pinned roots"
+git tag -a v2.0.0 -m "v2.0.0 — Trust Kernel v2 (vendored b9e1967), leveled verdict, pinned roots"
 git tag -f v2 "v2.0.0^{}" && git push origin v2.0.0 && git push -f origin v2
 gh release create v2.0.0 --title v2.0.0 --notes-file <(sed -n '/## Migrating from v1/,/### Security notes/p' README.md)
 ```

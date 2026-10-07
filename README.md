@@ -5,9 +5,9 @@ and reports a **leveled verdict**: `integrity → authentic → trusted → time
 It fails the job unless every level you `require` holds.
 
 v2 makes **no trust decision of its own.** Every decision is taken by
-[Trust Kernel v2](https://github.com/johnInarti/pqc-receipts-colosseum/blob/dab77b00f97e04a117882f1a5bc03f01e4add771/spec/TRUST-KERNEL.md),
+[Trust Kernel v2](https://github.com/johnInarti/pqc-receipts-colosseum/blob/b9e1967e9d6c6825e025f701a6752eac95c2f2e7/spec/TRUST-KERNEL.md),
 the single reference implementation, **vendored byte-exact** at commit
-[`dab77b0`](https://github.com/johnInarti/pqc-receipts-colosseum/tree/dab77b00f97e04a117882f1a5bc03f01e4add771)
+[`b9e1967`](https://github.com/johnInarti/pqc-receipts-colosseum/tree/b9e1967e9d6c6825e025f701a6752eac95c2f2e7)
 (`vendor/pqc-receipts-colosseum/`, listed file by file with git blob ids in `vendor/VENDOR.json`) and bundled into
 `dist/index.js` with ncc. `src/index.js` only reads inputs, hands raw bytes and an explicit policy to the kernel,
 and publishes its verdict. The kernel's whole adversarial corpus (129 vectors) is run **through the Action** in CI.
@@ -152,7 +152,7 @@ To reproduce v1's TLS-only trust explicitly: `allow-tls-directory: true` (report
 
 ```bash
 npm ci                                       # Node 20; exact @noble versions = the kernel's lockfile
-npm run vendor:check                         # vendored kernel == VENDOR.json (git blob ids of dab77b0)
+npm run vendor:check                         # vendored kernel == VENDOR.json (git blob ids of b9e1967)
 node scripts/vendor-kernel.mjs --upstream    # same, against a fresh clone of the upstream commit (network)
 npm test                                     # 53 tests, offline: migrated v1 unit tests, RT-1..RT-13, red-team PoCs,
                                              # and the 129-vector corpus THROUGH dist/index.js

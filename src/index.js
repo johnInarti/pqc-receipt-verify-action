@@ -4,7 +4,7 @@
  *
  * This file makes NO trust decision. It only (1) reads the step inputs and the files/URLs they name with
  * strict hygiene, (2) hands raw bytes + an explicit policy to Trust Kernel v2 (vendored byte-exact from
- * johnInarti/pqc-receipts-colosseum@dab77b0, see vendor/VENDOR.json), and (3) publishes the kernel's
+ * johnInarti/pqc-receipts-colosseum@b9e1967, see vendor/VENDOR.json), and (3) publishes the kernel's
  * leveled verdict as machine-safe outputs, a one-line log and an escaped step summary.
  *
  * Reads INPUT_* as the Actions runner sets them; writes $GITHUB_OUTPUT / $GITHUB_STEP_SUMMARY.
