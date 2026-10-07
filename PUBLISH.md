@@ -1,5 +1,38 @@
 # Publicar `pqc-receipt-verify-action` (pasos para el fundador)
 
+## v2.0.0 (Trust Kernel v2) — NADA publicado, NADA etiquetado
+
+La v2 vive en la rama local `v2` de
+`/private/tmp/claude-501/-Users-johneomo-repositorio-aux-fractal-ai/d290e137-d373-4939-8d45-9b7076a3c1d2/scratchpad/action-v2`
+(copia de `~/repositorio-aux/pqc-receipt-verify-action`, que sigue intacta en v1). `/private/tmp` se borra: cópiala
+antes si la quieres conservar.
+
+Re-verificar (Node 20):
+
+```bash
+npm ci && npm run vendor:check && node scripts/vendor-kernel.mjs --upstream
+npm test                                   # incluye el corpus de 129 vectores A TRAVÉS de dist/index.js
+npm run build && git status --short        # vacío: dist/ al día y reproducible
+./test/run-action-local.sh                 # 13 escenarios (7 en vivo: fractalai.net.co + RPC públicas Arc/Arbitrum)
+```
+
+Cuando decidas publicar (es versión MAYOR: los usuarios de `@v1` no cambian solos):
+
+```bash
+git checkout main && git merge --ff-only v2      # o abre un PR desde la rama v2
+git push origin main                              # el workflow test.yml debe salir verde
+git tag -a v2.0.0 -m "v2.0.0 — Trust Kernel v2 (vendored dab77b0), leveled verdict, pinned roots"
+git tag -f v2 "v2.0.0^{}" && git push origin v2.0.0 && git push -f origin v2
+gh release create v2.0.0 --title v2.0.0 --notes-file <(sed -n '/## Migrating from v1/,/### Security notes/p' README.md)
+```
+
+No muevas `v1` a la v2. Qué no afirmar: ver el final de este archivo y la sección *Limits* del README (raíces
+TOFU fijadas el 2026-10-07, sin cliente ligero de RPC, sin auditoría externa, no CMVP).
+
+---
+
+## v1 (histórico)
+
 Todo está construido y probado en local. **Nada se ha publicado.** Este repo git local ya tiene
 commits en `main`. No tiene remoto.
 

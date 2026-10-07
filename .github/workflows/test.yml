@@ -24,7 +24,14 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm test
+      - name: Vendored Trust Kernel is byte-identical to the pinned upstream commit (offline + upstream clone)
+        run: |
+          node scripts/vendor-kernel.mjs --check
+          node scripts/vendor-kernel.mjs --upstream
+      - name: Reference corpus on the vendored kernel (129/129)
+        run: node vendor/pqc-receipts-colosseum/corpus/run.mjs
+      - name: Unit + red-team + corpus THROUGH dist/index.js (runner-emulated)
+        run: npm test
       - name: dist/ is up to date with src/
         run: |
           npm run build
@@ -38,34 +45,57 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Real receipt by id (live key directory)
+      - name: Real receipt by id (public directory, pinned roots)
         id: live
         uses: ./
         with:
           receipt: fe62b072c2740e7a8d10cf7e643905b7d79f3f9b19f1c3970fc8754f18d538ee
 
-      - name: Assert real receipt is valid
+      - name: Assert real receipt is valid on the pinned roots
         env:
           VALID: ${{ steps.live.outputs.valid }}
           KID: ${{ steps.live.outputs.kid }}
           EPOCH: ${{ steps.live.outputs.epoch }}
+          BASIS: ${{ steps.live.outputs.trust-basis }}
+          TRUSTED: ${{ steps.live.outputs.trusted }}
         run: |
-          echo "valid=$VALID kid=$KID epoch=$EPOCH"
+          echo "valid=$VALID kid=$KID epoch=$EPOCH basis=$BASIS"
           test "$VALID" = "true"
+          test "$TRUSTED" = "true"
           test "$KID" = "86c139c960bb274c"
+          test "$BASIS" = "pinned-root"
           test -n "$EPOCH"
 
-      - name: Real receipt from file, pinned trusted key (offline trust)
+      - name: Real receipt + Arc mainnet anchor, every level required
+        id: arc
+        uses: ./
+        with:
+          receipt: fe62b072c2740e7a8d10cf7e643905b7d79f3f9b19f1c3970fc8754f18d538ee
+          anchors: 'true'
+          anchor-refs: '[{"chain_id":5042,"block_number":24072596}]'
+          require: integrity,authentic,trusted,time_anchored,finalized
+
+      - name: Assert anchored and finalized
+        env:
+          VALID: ${{ steps.arc.outputs.valid }}
+          ANCHORED: ${{ steps.arc.outputs.time_anchored }}
+          FINAL: ${{ steps.arc.outputs.finalized }}
+        run: |
+          echo "valid=$VALID time_anchored=$ANCHORED finalized=$FINAL"
+          test "$VALID" = "true" && test "$ANCHORED" = "true" && test "$FINAL" = "true"
+
+      - name: Real receipt from file, pinned trusted key (override, offline trust)
         id: pinned
         uses: ./
         with:
           receipt: test/vectors/genuine-fe62b072.json
           trusted-keys: test/vectors/trusted-keys.txt
 
-      - name: Assert pinned verification is valid
+      - name: Assert pinned verification is valid and reported as an override
         env:
           VALID: ${{ steps.pinned.outputs.valid }}
-        run: test "$VALID" = "true"
+          BASIS: ${{ steps.pinned.outputs.trust-basis }}
+        run: test "$VALID" = "true" && test "$BASIS" = "override"
 
       - name: Tampered vector (must fail)
         id: tampered
@@ -78,9 +108,9 @@ jobs:
         env:
           OUTCOME: ${{ steps.tampered.outcome }}
           VALID: ${{ steps.tampered.outputs.valid }}
-          REASON: ${{ steps.tampered.outputs.reason }}
+          CODES: ${{ steps.tampered.outputs.codes }}
         run: |
-          echo "outcome=$OUTCOME valid=$VALID reason=$REASON"
+          echo "outcome=$OUTCOME valid=$VALID codes=$CODES"
           test "$OUTCOME" = "failure"
           test "$VALID" = "false"
 

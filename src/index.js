@@ -1,25 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * GitHub Action entrypoint: FractalAI PQC Receipt Verify.
- * Reads INPUT_* (as the Actions runner sets them), verifies one receipt fail-closed, writes outputs
- * to $GITHUB_OUTPUT and a summary to $GITHUB_STEP_SUMMARY. No @actions/core dependency on purpose.
+ * GitHub Action entrypoint: FractalAI PQC Receipt Verify v2.
+ *
+ * This file makes NO trust decision. It only (1) reads the step inputs and the files/URLs they name with
+ * strict hygiene, (2) hands raw bytes + an explicit policy to Trust Kernel v2 (vendored byte-exact from
+ * johnInarti/pqc-receipts-colosseum@dab77b0, see vendor/VENDOR.json), and (3) publishes the kernel's
+ * leveled verdict as machine-safe outputs, a one-line log and an escaped step summary.
+ *
+ * Reads INPUT_* as the Actions runner sets them; writes $GITHUB_OUTPUT / $GITHUB_STEP_SUMMARY.
+ * No @actions/core dependency on purpose.
  */
-import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { appendFileSync, readFileSync, realpathSync, statSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { verifyReceipt, b64decode, ML_DSA_65_PK_BYTES } from './verify.js';
+import {
+  verify, boundedFetch, parseJsonStrict, b64decodeStrict, oneLine as kernelOneLine,
+  KERNEL_ID, SPEC_VERSION, LEVELS, KIND_NAMES, EXIT, SELF_TEST, ML_DSA_65_PK_BYTES,
+} from '../vendor/pqc-receipts-colosseum/kernel/src/index.mjs';
+import VENDOR from '../vendor/VENDOR.json' with { type: 'json' };
 
+const KERNEL_PIN = `${KERNEL_ID}@${String(VENDOR.commit).slice(0, 7)}`;
 const DEFAULT_DIRECTORY = 'https://fractalai.net.co/.well-known/x402-receipt-keys';
-// Per-attempt deadline (headers + body). The env override can only SHORTEN it (used by the tests).
+// Per-request deadline (headers + body, enforced by the kernel's boundedFetch). The env override can only
+// SHORTEN it (used by the tests).
 const FETCH_TIMEOUT_MS = Math.min(20_000, Math.max(500, Number(process.env.PQC_VERIFY_FETCH_TIMEOUT_MS) || 20_000));
 const FETCH_ATTEMPTS = 3;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
+class UsageError extends Error {
+  constructor(msg, code = 'USAGE', exit = EXIT.USAGE) { super(msg); this.code = code; this.exit = exit; }
+}
+const inputError = (msg, code = 'INPUT') => new UsageError(msg, code, EXIT.INPUT);
+
+// ── runner I/O ─────────────────────────────────────────────────────────────────────────────────────
 function getInput(name) {
   // The runner sets INPUT_<NAME> with spaces -> '_' and upper-cased; hyphens are kept.
   const v = process.env[`INPUT_${name.replace(/ /g, '_').toUpperCase()}`];
   return typeof v === 'string' ? v.trim() : '';
 }
+/** RT-1: one value -> exactly one log line (C0/C1, bidi overrides, U+2028/9 escaped; bounded). The kernel's escaper. */
+const oneLine = (s, max = 600) => kernelOneLine(s, max);
 function setOutput(name, value) {
   const file = process.env.GITHUB_OUTPUT;
   const v = String(value);
@@ -31,199 +51,319 @@ function setOutput(name, value) {
     process.stdout.write(`[output] ${name}=${oneLine(v)}\n`);
   }
 }
-/**
- * RT-1: untrusted text (receipt/directory fields, JSON.parse errors, paths) must never start a log line,
- * or the runner parses it as a workflow command (::add-mask::, ::stop-commands::, ::notice::, ...).
- * Escape every control/line-separator char so one value is always exactly one log line, and cap length.
- */
-const MAX_TEXT = 600;
-function oneLine(s) {
-  const t = String(s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-  return t.length > MAX_TEXT ? `${t.slice(0, MAX_TEXT)}…(truncated)` : t;
-}
 const esc = (s) => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 const annotate = (level, msg) => process.stdout.write(`::${level}::${esc(oneLine(msg))}\n`);
 /** RT-2: a summary table cell must not be able to break the table or inject markdown/HTML. */
-const mdCell = (s) => oneLine(s).replace(/[\\`*_{}\[\]()#+!|~>-]/g, '\\$&').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const mdCell = (s) => oneLine(s, 300).replace(/[\\`*_{}\[\]()#+!|~>-]/g, '\\$&').replace(/&/g, '&amp;').replace(/</g, '&lt;');
 function summary(md) {
   if (process.env.GITHUB_STEP_SUMMARY) {
     try { appendFileSync(process.env.GITHUB_STEP_SUMMARY, md + '\n'); } catch { /* summary is best-effort */ }
   }
 }
 
-/** RT-6: read at most MAX_BODY_BYTES from the stream (the old check ran after buffering the whole body). */
-async function readCapped(res, url) {
-  const len = Number(res.headers.get('content-length'));
-  if (Number.isFinite(len) && len > MAX_BODY_BYTES) throw new Error(`GET ${url} -> body larger than ${MAX_BODY_BYTES} bytes`);
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of res.body) {
-    total += chunk.byteLength;
-    if (total > MAX_BODY_BYTES) throw new Error(`GET ${url} -> body larger than ${MAX_BODY_BYTES} bytes`);
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf8');
+// ── inputs ─────────────────────────────────────────────────────────────────────────────────────────
+function boolInput(name, def) {
+  const v = getInput(name);
+  if (v === '') return def;
+  if (/^(true|1|yes|on)$/i.test(v)) return true;
+  if (/^(false|0|no|off)$/i.test(v)) return false;
+  throw new UsageError(`input "${name}" must be true or false`);
 }
-function parseJson(text, what) {
-  try { return JSON.parse(text); } catch { throw new Error(`${what} is not valid JSON`); } // RT-4: no content snippet in logs
+function intInput(name) {
+  const v = getInput(name);
+  if (v === '') return undefined;
+  if (!/^[0-9]{1,15}$/.test(v) || !Number.isSafeInteger(Number(v))) throw new UsageError(`input "${name}" must be a non-negative safe integer`);
+  return Number(v);
 }
+const listInput = (name) => getInput(name).split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 
-async function fetchJson(url) {
-  const u = new URL(url);
-  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname))) {
-    throw new Error(`refusing non-HTTPS URL ${url}`);
-  }
-  // Up to 3 attempts for transient network errors / 5xx / 429. A 4xx is final. Never retries into "valid":
-  // if every attempt fails, the caller reports valid=false (fail-closed).
-  // RT-7: the deadline is an explicit, strongly-referenced timer that covers headers AND body. With
-  // AbortSignal.timeout() the signal could be garbage-collected after the headers arrived, and a server that
-  // stalls mid-body held the step for undici's 300 s body timeout per stall (unbounded with a slow drip).
-  for (let attempt = 1; ; attempt++) {
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(new Error(`timeout after ${FETCH_TIMEOUT_MS} ms`)), FETCH_TIMEOUT_MS);
-    try {
-      const res = await fetch(u, { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/1' }, signal: ctl.signal, redirect: 'error' });
-      if (res.ok) return parseJson(await readCapped(res, url), `GET ${url} body`);
-      try { await res.body?.cancel(); } catch { /* ignore */ }
-      if ((res.status < 500 && res.status !== 429) || attempt >= FETCH_ATTEMPTS) throw Object.assign(new Error(`GET ${url} -> HTTP ${res.status}`), { final: true });
-    } catch (e) {
-      if (e && e.final) throw e;
-      if (/body larger than|is not valid JSON/.test(String(e && e.message))) throw e; // not transient
-      if (attempt >= FETCH_ATTEMPTS) {
-        const cause = e && e.cause ? ` (${e.cause.code || e.cause.message || e.cause})` : '';
-        throw new Error(`GET ${url} failed after ${attempt} attempts: ${e instanceof Error ? e.message : String(e)}${cause}`);
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-    await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
-  }
-}
 /**
- * RT-3: local files (receipt, key-directory, trusted-keys) must resolve — after following symlinks — to a
- * regular file inside GITHUB_WORKSPACE or RUNNER_TEMP, and be at most MAX_BODY_BYTES. A PR could otherwise
- * commit a symlink to /proc/self/environ, ~/.docker/config.json, /dev/zero, … and have it read and echoed.
+ * RT-3: local files must resolve — after following symlinks — to a regular file inside GITHUB_WORKSPACE or
+ * RUNNER_TEMP, and be at most 2 MiB. A PR could otherwise commit a symlink to /proc/self/environ,
+ * ~/.docker/config.json, /dev/zero, … and have it read and echoed.
  */
 function workspaceRoots() {
   const roots = [process.env.GITHUB_WORKSPACE || process.cwd(), process.env.RUNNER_TEMP].filter(Boolean);
   return roots.map((r) => { try { return realpathSync(r); } catch { return null; } }).filter(Boolean);
 }
+const resolveInWorkspace = (p) => path.resolve(process.env.GITHUB_WORKSPACE || process.cwd(), p);
+const resolvesToFile = (p) => existsSync(resolveInWorkspace(p));
 function safeLocalPath(p) {
-  const base = process.env.GITHUB_WORKSPACE || process.cwd();
-  const abs = path.resolve(base, p);
   let real;
-  try { real = realpathSync(abs); } catch { return null; }
+  try { real = realpathSync(resolveInWorkspace(p)); } catch { throw inputError(`file "${p}" does not exist`); }
   const inside = workspaceRoots().some((r) => real === r || real.startsWith(r + path.sep));
-  if (!inside) throw new Error(`file "${p}" resolves outside GITHUB_WORKSPACE/RUNNER_TEMP (symlink or path traversal refused)`);
+  if (!inside) throw inputError(`file "${p}" resolves outside GITHUB_WORKSPACE/RUNNER_TEMP (symlink or path traversal refused)`);
   const st = statSync(real);
-  if (!st.isFile()) throw new Error(`"${p}" is not a regular file`);
-  if (st.size > MAX_BODY_BYTES) throw new Error(`file "${p}" is larger than ${MAX_BODY_BYTES} bytes`);
+  if (!st.isFile()) throw inputError(`"${p}" is not a regular file`);
+  if (st.size > MAX_BODY_BYTES) throw inputError(`file "${p}" is larger than ${MAX_BODY_BYTES} bytes`, 'JSON_TOO_LARGE');
   return real;
 }
-function readTextFile(p) {
-  const real = safeLocalPath(p);
-  if (!real) throw new Error(`file "${p}" does not exist`);
-  return readFileSync(real, 'utf8');
+/**
+ * Raw bytes of a workspace file, as the kernel should see them. Valid UTF-8 is handed over as a string
+ * WITH any byte-order mark kept (so the kernel refuses it); invalid UTF-8 is handed over as bytes, so the
+ * kernel reports its own JSON_INVALID. Nothing is parsed or normalised here.
+ */
+function readRaw(p) {
+  const buf = readFileSync(safeLocalPath(p));
+  if (buf.length > MAX_BODY_BYTES) throw inputError(`file "${p}" is larger than ${MAX_BODY_BYTES} bytes`, 'JSON_TOO_LARGE');
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf); } catch { return new Uint8Array(buf); }
 }
-function readJsonFile(p) {
-  return parseJson(readTextFile(p), `file "${p}"`);
-}
-const isUrl = (s) => /^https?:\/\//i.test(s);
-const resolvesToFile = (s) => existsSync(path.resolve(process.env.GITHUB_WORKSPACE || process.cwd(), s));
+const isHttpUrl = (s) => /^https?:\/\//i.test(s);
 const isReceiptId = (s) => /^[0-9a-fA-F]{64}$/.test(s);
 
-/** trusted-keys: base64 keys separated by newlines/commas/whitespace, or a path to a file with them. */
+/** GET with the kernel's boundedFetch (one deadline, streamed byte cap, no redirects, https or loopback);
+ * up to 3 attempts on transient failures only. A retry can never turn into "valid": the kernel decides. */
+async function fetchText(url) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await boundedFetch(url, { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/2' }, timeoutMs: FETCH_TIMEOUT_MS, maxBytes: MAX_BODY_BYTES });
+    } catch (e) {
+      const detail = String(e?.detail ?? e?.message ?? e);
+      const transient = e?.code === 'RPC_ERROR' && /timeout after|failed:|HTTP (5\d\d|429)\b/.test(detail);
+      if (!transient || attempt >= FETCH_ATTEMPTS) {
+        throw inputError(`GET ${url} -> ${detail}${attempt > 1 ? ` (after ${attempt} attempts)` : ''}`, e?.code ?? 'INPUT');
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
+  }
+}
+/** A value that is either inline JSON or a workspace file holding JSON (returned raw, never re-serialised). */
+function jsonOrFile(name) {
+  const v = getInput(name);
+  if (v === '') return undefined;
+  if (/^[\[{]/.test(v)) return v;
+  return readRaw(v);
+}
+
+/**
+ * trusted-keys: base64 keys separated by newlines/commas/whitespace, or a path to a file with them.
+ * '#' starts a comment. Each entry must be a canonical 1952-byte ML-DSA-65 key (usage hygiene). A set
+ * that yields ZERO keys is handed to the kernel as an empty set (RT-5: never a silent fallback to the
+ * directory) and the kernel refuses it (NO_TRUST_SOURCE).
+ */
 function parseTrustedKeys(raw) {
-  if (!raw) return [];
   let text = raw;
-  if (!/[\s,]/.test(raw) && raw.length < 1024 && resolvesToFile(raw)) text = readTextFile(raw);
-  // '#' starts a comment that runs to the end of the line (a comment with spaces used to yield bogus "keys").
+  if (!/[\s,]/.test(raw) && raw.length < 1024 && resolvesToFile(raw)) {
+    text = readRaw(raw);
+    if (typeof text !== 'string') throw inputError('trusted-keys file is not valid UTF-8');
+  }
   const keys = text.split(/\r?\n/).map((l) => l.replace(/#.*$/, '')).join('\n')
     .split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-  // RT-5: a non-empty trusted-keys that yields no key must NOT silently fall back to the remote directory
-  // (that widened trust from "pinned" to "whatever the directory says").
-  if (keys.length === 0) throw new Error('trusted-keys was set but contains no key (empty file or only comments); refusing to fall back to the key directory');
   for (const k of keys) {
-    let n;
-    try { n = b64decode(k).length; } catch { throw new Error(`trusted-keys entry "${k.slice(0, 16)}…" is not base64`); }
-    if (n !== ML_DSA_65_PK_BYTES) throw new Error(`trusted-keys entry "${k.slice(0, 16)}…" is ${n} bytes, not an ML-DSA-65 public key (1952)`);
+    try { b64decodeStrict(k, ML_DSA_65_PK_BYTES, 'trusted-keys entry'); } catch { throw new UsageError(`trusted-keys entry "${oneLine(k.slice(0, 16))}…" is not a canonical base64 ML-DSA-65 public key (${ML_DSA_65_PK_BYTES} bytes)`); }
   }
   return keys;
 }
-
-async function loadReceipt(input, directoryInput) {
-  if (!input) throw new Error('input "receipt" is required (path to a receipt JSON, a 64-hex receipt id, or an https URL)');
-  if (isUrl(input)) return { receipt: await fetchJson(input), source: input };
-  // RT-8: a 64-hex id is ALWAYS fetched by id (and bound to that id). A workspace file with that name used
-  // to take precedence, letting a PR substitute a different genuine receipt for the requested one.
-  if (!isReceiptId(input) && resolvesToFile(input)) return { receipt: readJsonFile(input), source: input };
-  if (isReceiptId(input)) {
-    const origin = isUrl(directoryInput) ? new URL(directoryInput).origin : new URL(DEFAULT_DIRECTORY).origin;
-    const url = `${origin}/api/midas/alerts/receipt/${input.toLowerCase()}`;
-    return { receipt: await fetchJson(url), source: url, expectedId: input.toLowerCase() };
+/** rpc: one `CHAIN=URL` per line (or comma-separated); CHAIN is eip155:<id> or solana:<cluster>. */
+function parseRpc(raw) {
+  const out = {};
+  for (const item of raw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)) {
+    const i = item.indexOf('=');
+    const chain = i > 0 ? item.slice(0, i).trim() : '';
+    const url = i > 0 ? item.slice(i + 1).trim() : '';
+    if (!/^(eip155:[0-9]{1,12}|solana:[a-z][a-z-]{0,31})$/.test(chain) || !isHttpUrl(url)) throw new UsageError(`rpc entry "${oneLine(item, 120)}" must look like eip155:5042=https://… or solana:devnet=https://…`);
+    (out[chain] ||= []).push(url);
   }
-  throw new Error(`receipt "${input}" is neither an existing file, a 64-hex receipt id, nor an https URL`);
+  return out;
 }
+/** directory-history: one or more workspace files; each holds one epoch object, or (alone) an array of epochs. */
+function directoryHistory(raw) {
+  const files = raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  if (files.length === 0) return undefined;
+  const texts = files.map((f) => readRaw(f));
+  if (texts.some((t) => typeof t !== 'string')) throw inputError('directory-history file is not valid UTF-8');
+  if (texts.length === 1) return /^\s*\[/.test(texts[0]) ? texts[0] : `[${texts[0]}]`;
+  if (texts.some((t) => !/^\s*\{/.test(t))) throw new UsageError('with several directory-history files, each must hold one epoch object');
+  return `[${texts.join(',')}]`;
+}
+
+/**
+ * Builds the kernel call from the inputs. Every trust root the caller replaces (trust-roots, trusted-keys,
+ * governance-key, allow-tls-directory, solana-signers) is passed as the kernel's explicit override, which
+ * the kernel reflects as trust_basis "override"/"tls" and lists in `overrides`.
+ */
+async function buildCall() {
+  const receiptInput = getInput('receipt');
+  if (!receiptInput) throw new UsageError('input "receipt" is required (path to a receipt JSON, a 64-hex receipt id, or an https URL)');
+  const opts = { policy: {}, timeoutMs: FETCH_TIMEOUT_MS };
+  const notes = [];
+
+  const kinds = listInput('kind');
+  if (kinds.length === 1) opts.kind = kinds[0];
+  else if (kinds.length > 1) opts.kinds = kinds;
+  // kinds.length === 0 (explicit empty input): no policy kind -> the kernel refuses (KIND_UNKNOWN).
+
+  const req = listInput('require');
+  if (req.length) opts.policy.require = req;
+  opts.policy.allowTestnetAnchors = boolInput('allow-testnet-anchors', false);
+  opts.policy.requireKnownAnchorer = boolInput('require-known-anchorer', false);
+  for (const [inp, key] of [['min-confirmations', 'minConfirmations'], ['rpc-quorum', 'rpcQuorum'], ['max-clock-skew-sec', 'maxClockSkewSec']]) {
+    const n = intInput(inp); if (n !== undefined) opts.policy[key] = n;
+  }
+  if (boolInput('anchors', false)) opts.checkAnchors = true;
+  const anchorRefs = jsonOrFile('anchor-refs');
+  if (anchorRefs !== undefined) opts.anchors = anchorRefs;
+  const rpc = parseRpc(getInput('rpc'));
+  if (Object.keys(rpc).length) opts.rpc = rpc;
+
+  let expectedId = getInput('expected-id').toLowerCase() || undefined;
+  if (expectedId !== undefined && !isReceiptId(expectedId)) throw new UsageError('input "expected-id" must be 64 hex characters');
+
+  // ── overrides of the baked trust roots (explicit, always reported by the kernel) ──
+  const rootsInput = getInput('trust-roots');
+  if (rootsInput) {
+    const raw = readRaw(rootsInput);
+    let roots;
+    try { roots = parseJsonStrict(raw); } catch (e) { throw inputError(`trust-roots: ${e?.code ?? 'JSON_INVALID'} ${oneLine(e?.detail ?? '', 120)}`, e?.code ?? 'JSON_INVALID'); }
+    if (!roots || typeof roots !== 'object' || Array.isArray(roots)) throw new UsageError('trust-roots must be a JSON object (kernel/trust-roots.json format)');
+    opts.roots = roots;
+  }
+  const govKey = getInput('governance-key');
+  if (govKey) {
+    try { b64decodeStrict(govKey, ML_DSA_65_PK_BYTES, 'governance-key'); } catch { throw new UsageError(`governance-key is not a canonical base64 ML-DSA-65 public key (${ML_DSA_65_PK_BYTES} bytes)`); }
+    opts.governanceKey = govKey;
+  }
+  if (boolInput('allow-tls-directory', false)) opts.allowTlsDirectory = true;
+  const signers = listInput('solana-signers');
+  if (signers.length) opts.solanaSigners = signers;
+  const trustedRaw = getInput('trusted-keys');
+  if (trustedRaw) opts.trustedKeys = JSON.stringify(parseTrustedKeys(trustedRaw));
+
+  // ── the receipt (raw bytes; the kernel parses it) ──
+  // key-directory: absent -> the public FractalAI directory; explicitly '' -> no directory at all (only
+  // trusted-keys can then establish trust; otherwise the kernel answers NO_TRUST_SOURCE).
+  const directoryInput = process.env['INPUT_KEY-DIRECTORY'] === undefined ? DEFAULT_DIRECTORY : getInput('key-directory');
+  let receipt, source;
+  if (isHttpUrl(receiptInput)) { receipt = await fetchText(receiptInput); source = receiptInput; }
+  else if (isReceiptId(receiptInput)) {
+    // RT-8: a 64-hex id is ALWAYS fetched by id and bound to it (expectedId), never shadowed by a workspace file.
+    const id = receiptInput.toLowerCase();
+    if (expectedId !== undefined && expectedId !== id) throw new UsageError('expected-id differs from the receipt id given in "receipt"');
+    expectedId = id;
+    const origin = new URL(isHttpUrl(directoryInput) ? directoryInput : DEFAULT_DIRECTORY).origin;
+    source = `${origin}/api/midas/alerts/receipt/${id}`;
+    receipt = await fetchText(source);
+  } else if (resolvesToFile(receiptInput)) { receipt = readRaw(receiptInput); source = receiptInput; }
+  else throw inputError(`receipt "${oneLine(receiptInput, 120)}" is neither an existing file, a 64-hex receipt id, nor an https URL`);
+  if (expectedId !== undefined) opts.expectedId = expectedId;
+
+  // Anchor records (deployments/anchors/*.json in the kernel repo) wrap the receipt: { seal, anchor? }.
+  // Same unwrapping as the kernel's own CLI: hand over the inner seal; an outer anchor becomes the default hint.
+  if (typeof receipt === 'string') {
+    let top = null;
+    try { top = parseJsonStrict(receipt); } catch { /* the kernel reports the parse error with its code */ }
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+    if (top && typeof top === 'object' && !Array.isArray(top) && has(top, 'seal') && top.seal && typeof top.seal === 'object'
+        && !['canonical', 'body', 'decision', 'route_id', 'signature', 'receipt_id'].some((k) => has(top, k))) {
+      receipt = JSON.stringify(top.seal);
+      if (has(top, 'anchor') && opts.anchors === undefined) opts.anchors = JSON.stringify(top.anchor);
+      notes.push('anchor record: verified its inner "seal"');
+    }
+  }
+
+  // ── trust source: pinned set (override) or the key directory (verified against the pinned roots) ──
+  if (opts.trustedKeys === undefined && directoryInput !== '') {
+    opts.directory = isHttpUrl(directoryInput) ? await fetchText(directoryInput) : readRaw(directoryInput);
+    const hist = directoryHistory(getInput('directory-history'));
+    if (hist !== undefined) opts.directoryHistory = hist;
+  }
+  return { receipt, opts, source, notes };
+}
+
+// ── outputs ────────────────────────────────────────────────────────────────────────────────────────
+const lvl = (x) => (x === true ? 'true' : x === false ? 'false' : '');
+function publish(v, source, notes, failOnInvalid) {
+  // RT-11: every output is machine-safe — enums/hex/digits validated, reason one line.
+  const kid = /^[0-9a-f]{16}$/.test(v.key?.kid ?? '') ? v.key.kid : '';
+  const epoch = Number.isSafeInteger(v.directory?.epoch) && v.directory.epoch >= 0 ? String(v.directory.epoch) : '';
+  const basis = ['pinned-root', 'override', 'tls', 'none'].includes(v.trust_basis) ? v.trust_basis : 'none';
+  const kind = KIND_NAMES.includes(v.kind) ? v.kind : '';
+  const codes = [...new Set((v.reasons || []).map((r) => r.code).filter((c) => /^[A-Z0-9_]{1,64}$/.test(c)))];
+  const exitCode = Number.isSafeInteger(v.exit_code) ? String(v.exit_code) : String(EXIT.INPUT);
+  const valid = v.valid === true;
+  const reason = valid
+    ? `valid: ${(v.policy?.require ?? []).join('+')} hold (trust_basis=${basis}${kind ? `, kind=${kind}` : ''})`
+    : (v.reasons || []).map((r) => `[${r.level}] ${r.code}: ${r.detail}`).join('; ') || 'invalid';
+
+  setOutput('valid', valid ? 'true' : 'false');
+  for (const l of LEVELS) setOutput(l, lvl(v.levels?.[l]));
+  setOutput('trust-basis', basis);
+  setOutput('kid', kid);
+  setOutput('epoch', epoch);
+  setOutput('kind', kind);
+  setOutput('codes', codes.join(','));
+  setOutput('exit-code', exitCode);
+  setOutput('reason', oneLine(reason));
+
+  const L = v.levels || {};
+  const fmt = (x) => (x === true ? 'yes' : x === false ? 'NO' : '-');
+  process.stdout.write(`kernel: ${KERNEL_PIN} (spec ${SPEC_VERSION}, self-test ${SELF_TEST.ok ? 'ok' : 'FAILED'})\n`);
+  process.stdout.write(`receipt: ${oneLine(source)}\n`);
+  for (const n of notes) process.stdout.write(`note: ${oneLine(n)}\n`);
+  process.stdout.write(`${valid ? 'VALID' : 'INVALID'} kind=${kind || '-'} trust_basis=${basis} integrity=${fmt(L.integrity)} authentic=${fmt(L.authentic)} trusted=${fmt(L.trusted)} time_anchored=${fmt(L.time_anchored)} finalized=${fmt(L.finalized)}\n`);
+  if (kid) process.stdout.write(`key: kid=${kid} status=${oneLine(v.key?.status ?? '-')} time_basis=${oneLine(v.key?.time_basis ?? '-')}${epoch ? ` directory_epoch=${epoch}` : ''}\n`);
+  for (const a of v.anchors || []) process.stdout.write(`anchor: ${oneLine(a.ref ?? '?', 80)} ${a.counts ? 'counted' : 'refused'}${a.facts ? ` time=${oneLine(a.facts.time)} finalized=${oneLine(a.facts.finalized)} class=${oneLine(a.facts.network_class)}` : ''}\n`);
+  if ((v.overrides || []).length) process.stdout.write(`overrides: ${oneLine(v.overrides.join(', '))}\n`);
+  for (const r of v.reasons || []) process.stdout.write(`reason: [${oneLine(r.level, 20)}] ${oneLine(r.code, 64)}: ${oneLine(r.detail, 300)}\n`);
+
+  summary([
+    `### FractalAI PQC receipt — ${valid ? 'VALID' : 'INVALID'}`,
+    '',
+    '| field | value |', '|---|---|',
+    `| receipt | ${mdCell(source)} |`,
+    `| kind | ${kind || '\\-'} |`,
+    `| valid | ${valid} |`,
+    ...LEVELS.map((l) => `| ${l.replace('_', '\\_')} | ${lvl(L[l]) || 'not evaluated'} |`),
+    `| trust basis | ${basis} |`,
+    `| kid | ${kid || '\\-'} |`, `| directory epoch | ${epoch || '\\-'} |`,
+    `| overrides | ${(v.overrides || []).length ? mdCell(v.overrides.join(', ')) : 'none'} |`,
+    `| reason | ${mdCell(reason)} |`,
+    `| kernel | ${mdCell(KERNEL_PIN)} |`,
+    '',
+    '_A verdict states facts about bytes, keys and time. A valid ML-DSA-65 signature proves who signed which bytes (and, with anchors, by when) — not that their content is true._',
+  ].join('\n'));
+
+  if (valid && basis !== 'pinned-root') annotate('notice', `PQC receipt verified with trust_basis=${basis} (overrides: ${(v.overrides || []).join(', ') || 'none'}) — not the pinned FractalAI roots`);
+  if (!valid) {
+    if (failOnInvalid) { annotate('error', `PQC receipt INVALID: ${reason}`); process.exitCode = 1; }
+    else annotate('warning', `PQC receipt INVALID (fail-on-invalid=false): ${reason}`);
+  }
+}
+
+/** A verdict-shaped record for failures that happen before the kernel could run (usage / unreadable input). */
+const preKernelVerdict = (e) => ({
+  valid: false, kind: null, trust_basis: 'none', key: null, directory: null, anchors: [], overrides: [],
+  levels: { integrity: false, authentic: false, trusted: false, time_anchored: null, finalized: null },
+  reasons: [{ level: 'integrity', code: e instanceof UsageError ? e.code : 'INPUT', detail: `could not verify: ${e instanceof Error ? e.message : String(e)}` }],
+  exit_code: e instanceof UsageError ? e.exit : EXIT.INPUT,
+});
 
 async function run() {
   // RT-10: write valid=false first; if anything below crashes (OOM, unexpected throw) the output is still
   // "false", never empty. The final setOutput overrides it (last write of a name wins).
   setOutput('valid', 'false');
+  setOutput('trust-basis', 'none');
   const failOnInvalid = !/^(false|0|no|off)$/i.test(getInput('fail-on-invalid') || 'true');
-  const directoryInput = getInput('key-directory') || DEFAULT_DIRECTORY;
-  let result;
-  let source = '';
+
+  // Hard step deadline: whatever hangs (DNS, a slow RPC chain, …) the step ends with valid=false.
+  const timeoutSec = intInput('timeout-seconds') ?? 300;
+  const watchdog = setTimeout(() => {
+    try { setOutput('valid', 'false'); setOutput('exit-code', String(EXIT.INPUT)); setOutput('reason', `timeout: verification did not finish within ${timeoutSec} s`); } catch { /* ignore */ }
+    annotate(failOnInvalid ? 'error' : 'warning', `PQC receipt verify: hard timeout after ${timeoutSec} s (valid=false)`);
+    process.exit(failOnInvalid ? 1 : 0);
+  }, Math.min(900, Math.max(5, timeoutSec)) * 1000);
+  watchdog.unref();
+
+  let v, source = getInput('receipt'), notes = [];
   try {
-    const trustedKeys = parseTrustedKeys(getInput('trusted-keys'));
-    const { receipt, source: src, expectedId } = await loadReceipt(getInput('receipt'), directoryInput);
-    source = src;
-    let directory;
-    const governanceKey = getInput('governance-key') || undefined;
-    if (trustedKeys.length === 0) {
-      if (isUrl(directoryInput)) {
-        directory = await fetchJson(directoryInput);
-      } else {
-        // RT-9: a directory read from a file has no TLS origin, so its signature alone proves nothing (anyone
-        // who can write the file can sign it with their own governance key). Require a pinned signer.
-        if (!governanceKey) throw new Error('key-directory is a local file: set governance-key (the directory signer) — an unpinned local directory authenticates nothing');
-        directory = readJsonFile(directoryInput);
-      }
-    }
-    result = verifyReceipt(receipt, { trustedKeys, directory, governanceKey, expectedId });
+    const call = await buildCall();
+    source = call.source; notes = call.notes;
+    v = await verify(call.receipt, call.opts); // never throws: every failure is a coded reason
   } catch (e) {
-    result = { valid: false, reason: `could not verify: ${e instanceof Error ? e.message : String(e)}`, kid: '', epoch: '', signatureValid: false, keyTrust: 'none', checks: {} };
+    v = preKernelVerdict(e);
   }
-  // RT-11: outputs are machine-safe — kid is 16 hex, epoch is a non-negative integer, reason is one line.
-  const kid = /^[0-9a-f]{16}$/.test(result.kid || '') ? result.kid : '';
-  const epoch = /^[0-9]{1,16}$/.test(String(result.epoch ?? '')) ? String(result.epoch) : '';
-  setOutput('valid', result.valid === true ? 'true' : 'false');
-  setOutput('kid', kid);
-  setOutput('epoch', epoch);
-  setOutput('reason', oneLine(result.reason));
-
-  const shownSource = source || getInput('receipt');
-  process.stdout.write(`receipt: ${oneLine(shownSource)}\n`);
-  process.stdout.write(`checks: ${oneLine(JSON.stringify(result.checks))}\n`);
-  process.stdout.write(`${result.valid === true ? 'VALID' : 'INVALID'}: ${oneLine(result.reason)}\n`);
-  summary([
-    `### FractalAI PQC receipt — ${result.valid === true ? 'VALID' : 'INVALID'}`,
-    '',
-    `| field | value |`, `|---|---|`,
-    `| receipt | ${mdCell(shownSource)} |`,
-    `| valid | ${result.valid === true} |`, `| kid | ${kid || '-'} |`, `| directory epoch | ${epoch || '-'} |`,
-    `| key trust | ${mdCell(result.keyTrust)} |`, `| reason | ${mdCell(result.reason)} |`,
-    '',
-    '_A valid ML-DSA-65 signature proves authorship and integrity of the signed bytes, not that their content is true._',
-  ].join('\n'));
-
-  if (result.valid !== true) {
-    if (failOnInvalid) {
-      annotate('error', `PQC receipt INVALID: ${result.reason}`);
-      process.exitCode = 1;
-    } else {
-      annotate('warning', `PQC receipt INVALID (fail-on-invalid=false): ${result.reason}`);
-    }
-  }
+  clearTimeout(watchdog);
+  publish(v, source, notes, failOnInvalid);
 }
 
 run().catch((e) => {

@@ -1,38 +1,120 @@
 name: 'FractalAI PQC Receipt Verify'
-description: 'Verify FractalAI post-quantum (ML-DSA-65 / FIPS 204) signed receipts. Fail-closed: fails on tampering or untrusted keys.'
+description: 'Verify FractalAI post-quantum (ML-DSA-65 / FIPS 204) receipts with Trust Kernel v2: pinned roots, leveled verdict, optional on-chain time proofs. Fail-closed.'
 author: 'FRACTAL AI S.A.S.'
 branding:
   icon: 'shield'
   color: 'purple'
 inputs:
   receipt:
-    description: 'Path to a receipt JSON file inside GITHUB_WORKSPACE or RUNNER_TEMP (symlinks resolved, max 2 MB), a 64-hex receipt id (always fetched by id) (fetched from <key-directory origin>/api/midas/alerts/receipt/<id>), or an https URL to a receipt JSON.'
+    description: 'Path to a receipt JSON file inside GITHUB_WORKSPACE or RUNNER_TEMP (symlinks resolved, max 2 MiB), a 64-hex receipt id (always fetched by id from <key-directory origin>/api/midas/alerts/receipt/<id> and bound to it), or an https URL. An anchor record ({ "seal": …, "anchor"?: … }) is unwrapped to its seal.'
     required: true
+  kind:
+    description: 'Expected receipt kind(s), chosen by YOU, never by the document: midas-alert, x402-seal, acp-verdict, served-proof, self-attest-seal (comma-separated for several). Set to an empty string and the kernel refuses (KIND_UNKNOWN).'
+    required: false
+    default: 'midas-alert'
+  require:
+    description: 'Levels that must ALL be true for valid=true (comma-separated): integrity, authentic, trusted, time_anchored, finalized. integrity is always included.'
+    required: false
+    default: 'integrity,authentic,trusted'
+  anchors:
+    description: 'Evaluate on-chain time proofs (EVM PQCReceiptAnchor on the pinned deployments, Solana SPL Memo). Implied when require names time_anchored or finalized.'
+    required: false
+    default: 'false'
+  anchor-refs:
+    description: 'Anchor references (hints only), as inline JSON or a workspace file: one object or an array of up to 8, e.g. [{"chain_id":5042,"block_number":24072596}]. Default: the receipt''s own anchor/anchors fields.'
+    required: false
+    default: ''
+  rpc:
+    description: 'RPC endpoints, one CHAIN=URL per line (eip155:<id> or solana:<cluster>); several URLs for one chain are cross-checked and must agree. Default: the pinned default RPC of each deployment.'
+    required: false
+    default: ''
+  allow-testnet-anchors:
+    description: 'Count test-network anchors (e.g. Solana devnet) as time proofs. They stay marked network_class=test.'
+    required: false
+    default: 'false'
+  require-known-anchorer:
+    description: 'Count an EVM anchor only if the anchoring address is a known FractalAI anchorer.'
+    required: false
+    default: 'false'
+  min-confirmations:
+    description: 'Minimum confirmations for an EVM anchor (kernel default 1).'
+    required: false
+    default: ''
+  rpc-quorum:
+    description: 'Minimum number of RPC URLs that must be configured and agree per anchor (kernel default 1).'
+    required: false
+    default: ''
+  max-clock-skew-sec:
+    description: 'Allowed clock skew in seconds for signed times (kernel default 900).'
+    required: false
+    default: ''
+  expected-id:
+    description: 'Content id (64 hex) the receipt MUST have (binds a receipt file or URL to the one you meant). Set automatically when receipt is an id.'
+    required: false
+    default: ''
   key-directory:
-    description: 'Key directory (FRACTALAI-key-directory-v1): https URL, or path to a JSON file (a file REQUIRES governance-key). Its ML-DSA-65 governance signature and root are verified; it is used only when trusted-keys is empty.'
+    description: 'Key directory (FRACTALAI-key-directory-v1): https URL or a workspace file. Either way it is verified against the PINNED governance key and epoch-3 checkpoint (anti-rollback, append-only). Not used when trusted-keys is set.'
     required: false
     default: 'https://fractalai.net.co/.well-known/x402-receipt-keys'
+  directory-history:
+    description: 'Intermediate directory epochs between the pinned checkpoint and key-directory: workspace file(s), one per line (one epoch object each, or a single file with an array).'
+    required: false
+    default: ''
+  trust-roots:
+    description: 'OVERRIDE: a workspace file replacing the baked kernel/trust-roots.json (governance key, checkpoint, anchor deployments). Reported as trust-basis=override.'
+    required: false
+    default: ''
   trusted-keys:
-    description: 'Optional pinned trust set: base64 ML-DSA-65 public keys separated by newlines/commas, or a path to a file containing them. When set, the key directory is NOT consulted and only these keys are trusted.'
+    description: 'OVERRIDE: pinned set of base64 ML-DSA-65 receipt keys (newline/comma separated, # comments) or a workspace file with them. The key directory is then NOT consulted. Reported as trust-basis=override. A set with zero keys is refused.'
     required: false
     default: ''
   governance-key:
-    description: 'Optional base64 ML-DSA-65 public key that must have signed the key directory (pins the directory signer instead of trusting TLS).'
+    description: 'OVERRIDE: base64 ML-DSA-65 key that must have signed the key directory instead of the pinned one (the baked checkpoint then no longer applies). Reported as trust-basis=override.'
     required: false
     default: ''
+  allow-tls-directory:
+    description: 'OVERRIDE: accept a directory signed by ANY governance key (trust in TLS only, v1 behaviour). Reported as trust-basis=tls. Not recommended.'
+    required: false
+    default: 'false'
+  solana-signers:
+    description: 'OVERRIDE: Solana anchor signer addresses replacing the announced ones (comma/newline separated).'
+    required: false
+    default: ''
+  timeout-seconds:
+    description: 'Hard deadline for the whole step (5-900 s); on expiry valid=false.'
+    required: false
+    default: '300'
   fail-on-invalid:
-    description: 'Fail the step when the receipt is not valid (true/false).'
+    description: 'Fail the step when the receipt is not valid. Only false/0/no/off soften it.'
     required: false
     default: 'true'
 outputs:
   valid:
-    description: '"true" only if every integrity check passed, the ML-DSA-65 signature verifies AND the key is trusted (pinned, or active/retiring-in-window in the verified directory). Otherwise "false".'
+    description: '"true" only if every level in `require` is true. Written as "false" first (fail-closed).'
+  integrity:
+    description: 'Level 1 — the bytes parse strictly and every unsigned duplicate matches the signed content ("true"/"false").'
+  authentic:
+    description: 'Level 2 — the ML-DSA-65 signature verifies over the message rebuilt by the kernel ("true"/"false"/"" if not reached).'
+  trusted:
+    description: 'Level 3 — the key is authorized at the signed time by the pinned roots (or by an override) ("true"/"false").'
+  time_anchored:
+    description: 'Level 4 — a counted on-chain anchor proves the signed bytes existed by a block time ("true"/"false"; "" when anchors were not evaluated).'
+  finalized:
+    description: 'Level 5 — that anchor is in a finalized block ("true"/"false"; "" when not evaluated).'
+  trust-basis:
+    description: 'pinned-root | override | tls | none — what the trust decision rested on.'
   kid:
-    description: 'Key id of the signing key: sha256(public_key_b64)[:16]. Empty if the receipt failed before the signature check.'
+    description: 'Key id of the signing key: sha256(public_key_b64)[:16] (empty if the signature was not verified).'
   epoch:
-    description: 'Epoch of the key directory used (empty when trusted-keys was used).'
+    description: 'Key directory epoch used (empty with trusted-keys or when the directory was refused).'
+  kind:
+    description: 'Receipt kind the kernel verified.'
+  codes:
+    description: 'Comma-separated kernel reason codes (e.g. SIGNATURE_INVALID, KEY_NOT_LISTED, ANCHOR_SQUATTED).'
+  exit-code:
+    description: 'Kernel exit code: 0 valid, 10 integrity, 11 authentic, 12 trusted, 13 time_anchored, 14 finalized, 2 usage, 3 input.'
   reason:
-    description: 'Human-readable reason for the verdict.'
+    description: 'One-line human-readable reason for the verdict.'
 runs:
   using: 'node20'
   main: 'dist/index.js'

@@ -1,3 +1,6 @@
+@fractalai/pqc-trust-kernel
+Apache-2.0
+
 @noble/curves
 MIT
 The MIT License (MIT)
