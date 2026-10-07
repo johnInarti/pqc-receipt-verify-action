@@ -19,9 +19,10 @@ scenario() {
     "INPUT_KEY-DIRECTORY=https://fractalai.net.co/.well-known/x402-receipt-keys" "INPUT_FAIL-ON-INVALID=true" \
     "INPUT_TRUSTED-KEYS=" "INPUT_GOVERNANCE-KEY=" "$@" "$NODE" dist/index.js > "$TMP/log" 2>&1
   local code=$?
-  local valid; valid="$(awk '/^valid<</{getline; print; exit}' "$TMP/out")"
-  local kid; kid="$(awk '/^kid<</{getline; print; exit}' "$TMP/out")"
-  local epoch; epoch="$(awk '/^epoch<</{getline; print; exit}' "$TMP/out")"
+  # last write of an output name wins (the action writes valid=false first, fail-closed)
+  local valid; valid="$(awk '/^valid<</{getline; v=$0} END{print v}' "$TMP/out")"
+  local kid; kid="$(awk '/^kid<</{getline; v=$0} END{print v}' "$TMP/out")"
+  local epoch; epoch="$(awk '/^epoch<</{getline; v=$0} END{print v}' "$TMP/out")"
   if [[ "$code" == "$want_exit" && "$valid" == "$want_valid" ]]; then
     pass=$((pass+1)); printf 'PASS  %-58s exit=%s valid=%s kid=%s epoch=%s\n' "$name" "$code" "$valid" "${kid:--}" "${epoch:--}"
   else
@@ -35,7 +36,9 @@ if [[ "${OFFLINE:-0}" != "1" ]]; then
   scenario "live: tampered file -> live directory (must fail)"   1 false "INPUT_RECEIPT=test/vectors/tampered-fe62b072.json"
   scenario "live: unknown receipt id (must fail)"                1 false "INPUT_RECEIPT=$(printf 'a%.0s' {1..64})"
 fi
-scenario "offline: genuine + directory snapshot file"            0 true  "INPUT_RECEIPT=test/vectors/genuine-fe62b072.json" "INPUT_KEY-DIRECTORY=test/vectors/key-directory-epoch3.json"
+GOV_KEY="$(${NODE} -e 'process.stdout.write(require("./test/vectors/key-directory-epoch3.json").directory_public_key)')"
+scenario "offline: genuine + directory snapshot file + governance pin" 0 true  "INPUT_RECEIPT=test/vectors/genuine-fe62b072.json" "INPUT_KEY-DIRECTORY=test/vectors/key-directory-epoch3.json" "INPUT_GOVERNANCE-KEY=$GOV_KEY"
+scenario "offline: directory snapshot file WITHOUT governance pin (must fail)" 1 false "INPUT_RECEIPT=test/vectors/genuine-fe62b072.json" "INPUT_KEY-DIRECTORY=test/vectors/key-directory-epoch3.json"
 scenario "offline: genuine + pinned trusted-keys"                0 true  "INPUT_RECEIPT=test/vectors/genuine-fe62b072.json" "INPUT_TRUSTED-KEYS=$PINNED_KEY"
 scenario "offline: tampered + pinned trusted-keys (must fail)"   1 false "INPUT_RECEIPT=test/vectors/tampered-fe62b072.json" "INPUT_TRUSTED-KEYS=$PINNED_KEY"
 scenario "offline: tampered, fail-on-invalid=false (soft)"       0 false "INPUT_RECEIPT=test/vectors/tampered-fe62b072.json" "INPUT_TRUSTED-KEYS=$PINNED_KEY" "INPUT_FAIL-ON-INVALID=false"

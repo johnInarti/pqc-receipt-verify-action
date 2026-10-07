@@ -137,3 +137,35 @@ test('reserved route x402-attest-decision refused in served-proof shape', () => 
   t.signed_message = `${t.domain}\n${t.route_id}\n${t.digest}`;
   assert.equal(verifyReceipt(t, { trustedKeys: [CONF.trusted_public_key] }).valid, false);
 });
+
+// ---- red-team 2026-10-06 regressions (core) ----
+test('RT-13: served proof from a RETIRING key cannot be backdated with an unsigned top-level emitted_at', () => {
+  const k = ml_dsa65.keygen(seed(21)); const gov = ml_dsa65.keygen(seed(22)); const pk = b64(k.publicKey);
+  const digest = sha256hex('signed after not_after'); const sm = `FRACTALAI-x402-served-v1\nverify-agent\n${digest}`;
+  const proof = { domain: 'FRACTALAI-x402-served-v1', route_id: 'verify-agent', digest, signed_message: sm, signature: b64(ml_dsa65.sign(utf8(sm), k.secretKey)), public_key: pk, emitted_at: 1600000000 };
+  const d = makeDir([{ kid: kidForKey(pk), use: 'x402-receipt', public_key_b64: pk, status: 'retiring', not_before: 0, not_after: 1700000000 }], gov);
+  const r = verifyReceipt(proof, { directory: d, governanceKey: b64(gov.publicKey) });
+  assert.equal(r.valid, false, r.reason); assert.equal(r.signatureValid, true);
+});
+test('RT-13: receipt whose canonical is not key=value cannot use unsigned top-level emitted_at for a retiring key', () => {
+  const k = ml_dsa65.keygen(seed(23)); const gov = ml_dsa65.keygen(seed(24)); const pk = b64(k.publicKey);
+  const f = forge(GENUINE, k, () => 'FRACTALAI-midas-alert-v1\nnot-key-value');
+  delete f.facts; delete f.domain; f.emitted_at = 1600000000;
+  const d = makeDir([{ kid: kidForKey(pk), use: 'x402-receipt', public_key_b64: pk, status: 'retiring', not_before: 0, not_after: 1700000000 }], gov);
+  assert.equal(verifyReceipt(f, { directory: d }).valid, false);
+});
+test('RT-12: directory listing the same key twice (active + revoked) is rejected', () => {
+  const k = ml_dsa65.keygen(seed(25)); const gov = ml_dsa65.keygen(seed(26)); const pk = b64(k.publicKey);
+  const e = { kid: kidForKey(pk), use: 'x402-receipt', public_key_b64: pk, not_before: 0, not_after: null };
+  const d = makeDir([{ ...e, status: 'active' }, { ...e, status: 'revoked' }], gov);
+  const r = verifyReceipt(forge(GENUINE, k), { directory: d, governanceKey: b64(gov.publicKey) });
+  assert.equal(r.valid, false); assert.match(r.reason, /more than once/);
+});
+test('RT-11: a rejected directory never surfaces its (attacker-controlled) epoch; non-integer epoch rejected', () => {
+  const d = clone(DIR); d.epoch = '3$(touch /tmp/pwned)';
+  const r = verifyReceipt(GENUINE, { directory: d });
+  assert.equal(r.valid, false); assert.equal(r.epoch, '');
+  const k = ml_dsa65.keygen(seed(27)); const gov = ml_dsa65.keygen(seed(28)); const pk = b64(k.publicKey);
+  const sd = makeDir([{ kid: kidForKey(pk), use: 'x402-receipt', public_key_b64: pk, status: 'active', not_before: 0, not_after: null }], gov, '1;id');
+  assert.equal(checkDirectory(sd).ok, false);
+});

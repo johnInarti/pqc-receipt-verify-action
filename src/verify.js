@@ -71,14 +71,24 @@ export function checkDirectory(dir, { governanceKey } = {}) {
     if (!dir || typeof dir !== 'object') return NO('key directory is not a JSON object');
     if (dir.spec !== KEY_DIR_DOMAIN) return NO(`key directory spec is not ${KEY_DIR_DOMAIN}`);
     if (!Array.isArray(dir.keys)) return NO('key directory has no keys[]');
+    // RT-11: epoch is a non-negative integer (it is echoed as an output that workflows interpolate).
+    if (!Number.isSafeInteger(dir.epoch) || dir.epoch < 0) return NO('key directory epoch is not a non-negative integer');
     const pk = b64decode(dir.directory_public_key);
     const sig = b64decode(dir.signature);
     if (pk.length !== ML_DSA_65_PK_BYTES) return NO('directory governance key is not 1952 bytes (not ML-DSA-65)');
     if (sig.length !== ML_DSA_65_SIG_BYTES) return NO('directory signature is not 3309 bytes (not ML-DSA-65)');
+    const seenKid = new Set();
+    const seenKey = new Set();
     for (const k of dir.keys) {
       if (!k || typeof k.public_key_b64 !== 'string' || k.kid !== kidForKey(k.public_key_b64)) {
-        return NO(`directory kid ${k && k.kid} != sha256(public_key)[:16] (forged/aliased kid)`);
+        return NO('directory has a kid != sha256(public_key)[:16] (forged/aliased kid)');
       }
+      // RT-12: one entry per key. Duplicates (e.g. an old "active" entry plus a later "revoked" one for the
+      // same key) are ambiguous, and a first-match lookup would honour the stale "active" entry.
+      let nk;
+      try { nk = normKey(k.public_key_b64); } catch { return NO('directory key is not canonical base64'); }
+      if (seenKid.has(k.kid) || seenKey.has(nk)) return NO('directory lists the same key more than once (ambiguous status)');
+      seenKid.add(k.kid); seenKey.add(nk);
     }
     const root = directoryRoot(dir.keys, dir.prev_root, dir.epoch, dir.directory_public_key);
     if (root !== dir.root) return NO('directory root does not recompute over keys/epoch/prev_root/governance key (tampered)');
@@ -130,8 +140,9 @@ function trustStep(publicKeyB64, kid, emitted, opts, checks, fail) {
   if (!dir) return fail('no trusted-keys and no key directory supplied (fail-closed)', { kid, signatureValid: true });
   const d = checkDirectory(dir, { governanceKey: opts.governanceKey });
   checks.key_directory_integrity = d.ok;
-  const epoch = dir && dir.epoch !== undefined ? String(dir.epoch) : '';
-  if (!d.ok) return fail(`key directory rejected: ${d.reason}`, { kid, epoch, signatureValid: true });
+  // RT-11: the epoch of a directory that failed verification is attacker-controlled; never surface it.
+  if (!d.ok) return fail(`key directory rejected: ${d.reason}`, { kid, signatureValid: true });
+  const epoch = String(dir.epoch);
   const entry = dir.keys.find((k) => { try { return normKey(k.public_key_b64) === pkNorm; } catch { return false; } });
   checks.key_in_directory = !!entry;
   if (!entry) return fail('signature verifies but the key is NOT in the key directory', { kid, epoch, signatureValid: true });
@@ -184,7 +195,9 @@ function verifyServedProof(e, opts, checks, fail) {
   checks.ml_dsa65_signature_valid = ok;
   const kid = kidForKey(normKey(e.public_key));
   if (!ok) return fail('ML-DSA-65 signature does not verify over signed_message', { kid });
-  return trustStep(e.public_key, kid, e.emitted_at, opts, checks, fail);
+  // RT-13: the served-proof shape signs only domain/route/digest. A top-level emitted_at is NOT signed, so it
+  // must not be used to place the proof inside a retiring key's window (it was backdatable at will).
+  return trustStep(e.public_key, kid, undefined, opts, checks, fail);
 }
 
 /**
@@ -271,7 +284,8 @@ export function verifyReceipt(receipt, opts = {}) {
     if (!sigOk) return fail('ML-DSA-65 signature does not verify over served_message', { kid });
 
     // 5. Key trust — FAIL-CLOSED. A valid signature under an unknown key proves nothing about who signed.
-    const emitted = signedEmittedAt !== undefined ? signedEmittedAt : receipt.emitted_at;
+    // RT-13: only a SIGNED emitted_at (from canonical) may place the receipt in a key's validity window.
+    const emitted = signedEmittedAt;
     return trustStep(receipt.public_key, kid, emitted, opts, checks, fail);
   } catch (e) {
     return fail(`verify error: ${e instanceof Error ? e.message : String(e)}`);

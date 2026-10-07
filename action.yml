@@ -6,10 +6,10 @@ branding:
   color: 'purple'
 inputs:
   receipt:
-    description: 'Path to a receipt JSON file in the workspace, a 64-hex receipt id (fetched from <key-directory origin>/api/midas/alerts/receipt/<id>), or an https URL to a receipt JSON.'
+    description: 'Path to a receipt JSON file inside GITHUB_WORKSPACE or RUNNER_TEMP (symlinks resolved, max 2 MB), a 64-hex receipt id (always fetched by id) (fetched from <key-directory origin>/api/midas/alerts/receipt/<id>), or an https URL to a receipt JSON.'
     required: true
   key-directory:
-    description: 'Key directory (FRACTALAI-key-directory-v1): https URL or path to a JSON file. Its ML-DSA-65 governance signature and root are verified; it is used only when trusted-keys is empty.'
+    description: 'Key directory (FRACTALAI-key-directory-v1): https URL, or path to a JSON file (a file REQUIRES governance-key). Its ML-DSA-65 governance signature and root are verified; it is used only when trusted-keys is empty.'
     required: false
     default: 'https://fractalai.net.co/.well-known/x402-receipt-keys'
   trusted-keys:

@@ -7,12 +7,33 @@ It is fail-closed: `valid` is `true` only when every integrity check passes, the
 verifies, **and** the signing key is trusted. A correct signature from an unknown key is still `false`.
 
 ```yaml
-- uses: johnInarti/pqc-receipt-verify-action@v1
+- uses: johnInarti/pqc-receipt-verify-action@<full-commit-sha> # v1.x — pin the SHA, not the movable v1 tag
   id: receipt
   with:
     receipt: fe62b072c2740e7a8d10cf7e643905b7d79f3f9b19f1c3970fc8754f18d538ee
-- run: echo "valid=${{ steps.receipt.outputs.valid }} kid=${{ steps.receipt.outputs.kid }} epoch=${{ steps.receipt.outputs.epoch }}"
+- env:            # pass outputs through env, never interpolate ${{ }} into the script
+    VALID: ${{ steps.receipt.outputs.valid }}
+    KID: ${{ steps.receipt.outputs.kid }}
+    EPOCH: ${{ steps.receipt.outputs.epoch }}
+  run: |
+    echo "valid=$VALID kid=$KID epoch=$EPOCH"
+    test "$VALID" = "true"   # gate on == "true"; never on != "false"
 ```
+
+### Security notes for workflow authors
+
+- **Pin by commit SHA.** `@v1` is a movable tag; whoever controls the repo can repoint it. `@<sha>` is immutable.
+- **Trust anchors must not come from the code under test.** On `pull_request`, files in the checkout
+  (and the workflow itself) come from the PR. A `trusted-keys` file, a `key-directory` file or a receipt file
+  in the PR tree is attacker-controlled. Put `trusted-keys` / `governance-key` inline in a workflow on the
+  protected branch, and treat a PR-run as advisory.
+- **Local files** (`receipt`, `key-directory`, `trusted-keys`) must resolve, after following symlinks, to a
+  regular file of at most 2 MB inside `GITHUB_WORKSPACE` or `RUNNER_TEMP`.
+- **A `key-directory` file requires `governance-key`.** A file has no TLS origin, so an unpinned
+  directory signature authenticates nothing (anyone can sign a directory with their own key).
+- **A 64-hex `receipt` is always fetched by id** and bound to that id, even if a file with that name exists.
+- `trusted-keys` that is set but yields no key (empty file, only `#` comments) fails; it never falls back
+  to the directory.
 
 ## Inputs
 

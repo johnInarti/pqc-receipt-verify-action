@@ -14,9 +14,12 @@ permissions:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -29,8 +32,11 @@ jobs:
 
   action:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Real receipt by id (live key directory)
         id: live
@@ -57,7 +63,9 @@ jobs:
           trusted-keys: test/vectors/trusted-keys.txt
 
       - name: Assert pinned verification is valid
-        run: test "${{ steps.pinned.outputs.valid }}" = "true"
+        env:
+          VALID: ${{ steps.pinned.outputs.valid }}
+        run: test "$VALID" = "true"
 
       - name: Tampered vector (must fail)
         id: tampered
@@ -84,4 +92,6 @@ jobs:
           fail-on-invalid: 'false'
 
       - name: Assert soft mode
-        run: test "${{ steps.soft.outputs.valid }}" = "false"
+        env:
+          VALID: ${{ steps.soft.outputs.valid }}
+        run: test "$VALID" = "false"
