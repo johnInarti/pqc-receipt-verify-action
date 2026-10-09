@@ -1,0 +1,41 @@
+name: 'PQC Readiness Scan (CBOM)'
+description: 'Find the quantum-vulnerable cryptography in your repo and emit a CycloneDX CBOM. NIST deprecates these algorithms after 2030 and disallows them after 2035.'
+author: 'FractalAI'
+branding:
+  icon: 'shield'
+  color: 'purple'
+inputs:
+  path:
+    description: 'Directory to scan.'
+    required: false
+    default: '.'
+  output:
+    description: 'Where to write the CycloneDX CBOM.'
+    required: false
+    default: 'cbom.json'
+  fail-on-findings:
+    description: 'Exit non-zero if quantum-vulnerable cryptography is found. Default false: this is an inventory, not a gate.'
+    required: false
+    default: 'false'
+  seal:
+    description: 'Optional. Set to true to also request an ML-DSA-65 (FIPS 204) signature over the CBOM from FractalAI. Costs USDC over x402 and is NEVER required: the scan and the CBOM are free and run entirely in your runner.'
+    required: false
+    default: 'false'
+outputs:
+  findings:
+    description: 'Number of quantum-vulnerable cryptographic assets found.'
+    value: ${{ steps.scan.outputs.findings }}
+  cbom:
+    description: 'Path to the generated CBOM.'
+    value: ${{ steps.scan.outputs.cbom }}
+runs:
+  using: 'composite'
+  steps:
+    - id: scan
+      shell: bash
+      run: |
+        node "${{ github.action_path }}/scan.mjs" \
+          --path="${{ inputs.path }}" \
+          --output="${{ inputs.output }}" \
+          --fail-on-findings="${{ inputs.fail-on-findings }}" \
+          --seal="${{ inputs.seal }}"

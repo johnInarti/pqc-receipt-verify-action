@@ -1,0 +1,57 @@
+name: readiness-scan self-test
+
+# La acción se prueba contra sí misma en cada push: tres casos que cubren los tres
+# resultados posibles. Si alguna vez un cambio volviera a marcar ML-DSA como vulnerable,
+# este pase falla antes de que lo vea un usuario.
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Caso 1 — código vulnerable de verdad (debe encontrar RSA y ECDSA)
+        run: |
+          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=/tmp/a.json
+          python3 - <<'PY'
+          import json
+          c=json.load(open('/tmp/a.json'))
+          names={x['name'] for x in c['components']}
+          assert any('RSA' in n for n in names), names
+          assert any('ECDSA' in n for n in names), names
+          print('OK: encuentra lo vulnerable')
+          PY
+
+      - name: Caso 2 — código post-cuántico (NO debe marcar ML-DSA como vulnerable)
+        run: |
+          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/resistant --output=/tmp/b.json
+          python3 - <<'PY'
+          import json
+          c=json.load(open('/tmp/b.json'))
+          vuln=[x['name'] for x in c['components']
+                if any(p['name']=='fractalai:quantum_vulnerable' and p['value']=='true'
+                       for p in x.get('properties',[]))]
+          assert vuln==[], f'falso positivo: {vuln}'
+          print('OK: no hay falsos positivos sobre ML-DSA/ML-KEM/SLH-DSA')
+          PY
+
+      - name: Caso 3 — el CBOM es CycloneDX 1.6 válido
+        run: |
+          python3 - <<'PY'
+          import json
+          c=json.load(open('/tmp/a.json'))
+          assert c['bomFormat']=='CycloneDX' and c['specVersion']=='1.6'
+          assert c['serialNumber'].startswith('urn:uuid:')
+          for x in c['components']:
+              assert x['type']=='cryptographic-asset'
+              assert 'cryptoProperties' in x
+          print('OK: CycloneDX 1.6 con cryptographic-asset')
+          PY
+
+      - name: Caso 4 — fail-on-findings corta el pase
+        run: |
+          if node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=/tmp/c.json --fail-on-findings=true; then
+            echo "ERROR: debió salir con código != 0"; exit 1
+          fi
+          echo "OK: fail-on-findings funciona"

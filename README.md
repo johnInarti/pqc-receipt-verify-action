@@ -178,3 +178,20 @@ Vectors in `test/vectors/`: `genuine-fe62b072.json` (real public receipt), `tamp
 
 Apache-2.0. The vendored kernel, corpus and spec are Apache-2.0 (`vendor/pqc-receipts-colosseum/LICENSE`).
 Copyright 2026 FRACTAL AI S.A.S. Contact: softnextceo@gmail.com · https://fractalai.net.co
+
+---
+
+## Also in this repo: PQC Readiness Scan
+
+A second, independent Action that scans **any** repository for quantum-vulnerable
+cryptography and emits a CycloneDX 1.6 CBOM. Free, runs entirely in your runner, uploads
+nothing, needs no account.
+
+```yaml
+- uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2
+```
+
+NIST IR 8547 deprecates RSA, ECDSA, ECDH, DH and DSA after 2030 and disallows them after
+2035. The first deliverable of every migration is knowing where those algorithms live.
+See [`readiness-scan/README.md`](readiness-scan/README.md) for inputs, outputs and the
+explicit limits of a static scan.
