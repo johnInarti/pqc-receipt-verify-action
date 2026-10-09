@@ -1,0 +1,97 @@
+name: readiness-scan e2e (como lo adopta un desconocido)
+
+# La prueba de punta a punta: no ejecuta scan.mjs a mano, CONSUME la acción por referencia
+# `uses:` exactamente como la escribirá cualquier repo del mundo, en los tres sistemas
+# operativos que ofrece GitHub. Si el manifiesto, el shell, las comillas de la ruta, el
+# runtime de Node o los separadores de ruta de Windows estuvieran mal, esto falla aquí y no
+# en el pase de un tercero.
+
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  adopt:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versión de Node del runner
+        run: node --version
+
+      # Caso real de adopción: un repo con criptografía clásica. Debe encontrarla.
+      - name: La acción, consumida por referencia
+        id: pqc
+        uses: ./readiness-scan
+        with:
+          path: readiness-scan/test/fixtures/vulnerable
+          output: cbom-e2e.json
+
+      - name: Las salidas de la acción son utilizables
+        shell: bash
+        env:
+          FINDINGS: ${{ steps.pqc.outputs.findings }}
+          CBOM: ${{ steps.pqc.outputs.cbom }}
+        run: |
+          set -euo pipefail
+          echo "findings=$FINDINGS cbom=$CBOM"
+          test -n "$FINDINGS" || { echo "::error::la salida findings vino vacía"; exit 1; }
+          test "$FINDINGS" -gt 0 2>/dev/null || { echo "::error::findings no es un entero > 0: '$FINDINGS'"; exit 1; }
+          test -f "$CBOM" || { echo "::error::la salida cbom no apunta a un archivo existente"; exit 1; }
+          node -e "
+            const c = require('./' + process.env.CBOM.replace(/\\\\/g, '/'));
+            if (c.bomFormat !== 'CycloneDX' || c.specVersion !== '1.6') throw new Error('no es CycloneDX 1.6');
+            const vuln = c.components.filter(x => (x.properties||[]).some(p => p.name==='fractalai:quantum_vulnerable' && p.value==='true')).map(x=>x.name);
+            if (!vuln.some(n => n.includes('RSA'))) throw new Error('no encontró RSA: ' + JSON.stringify(vuln));
+            console.log('CBOM válido, familias vulnerables:', vuln.join(', '));
+          "
+
+      # El caso inverso: un repo ya post-cuántico. No debe marcar NADA.
+      - name: Repo post-cuántico, sin falsos positivos
+        id: clean
+        uses: ./readiness-scan
+        with:
+          path: readiness-scan/test/fixtures/resistant
+          output: cbom-clean.json
+
+      - name: findings debe ser exactamente 0
+        shell: bash
+        env:
+          FINDINGS: ${{ steps.clean.outputs.findings }}
+        run: |
+          set -euo pipefail
+          test "$FINDINGS" = "0" || { echo "::error::falso positivo sobre código post-cuántico: findings=$FINDINGS"; exit 1; }
+          echo "0 falsos positivos sobre ML-DSA / ML-KEM"
+
+      # Que la puerta de corte funcione de verdad cuando alguien la activa.
+      - name: fail-on-findings corta el pase
+        id: gate
+        continue-on-error: true
+        uses: ./readiness-scan
+        with:
+          path: readiness-scan/test/fixtures/vulnerable
+          output: cbom-gate.json
+          fail-on-findings: 'true'
+
+      - name: y su fallo es observable
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = "failure" || { echo "::error::fail-on-findings no cortó el pase (outcome=$OUTCOME)"; exit 1; }
+          echo "la puerta de corte funciona"
+
+      # Un repositorio grande y real, para medir que escala.
+      - name: Escala: el repo entero, con tiempo medido
+        shell: bash
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          node readiness-scan/scan.mjs --path=. --output=cbom-full.json
+          echo "segundos: $(( $(date +%s) - start ))"
