@@ -194,4 +194,5 @@ nothing, needs no account.
 NIST IR 8547 deprecates RSA, ECDSA, ECDH, DH and DSA after 2030 and disallows them after
 2035. The first deliverable of every migration is knowing where those algorithms live.
 See [`readiness-scan/README.md`](readiness-scan/README.md) for inputs, outputs and the
-explicit limits of a static scan.
+explicit limits of a static scan, and [`CHANGELOG.md`](CHANGELOG.md) for what changed in which
+Action: the two share one tag namespace, so every entry says which one moved.
