@@ -127,6 +127,22 @@ async function fetchText(url) {
     await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
   }
 }
+/** Fixed same-origin relocation, matching Trust Kernel 2.3 locate.mjs. Pins remain unchanged. */
+async function fetchLegacyDirectoryText(url) {
+  const isLegacy = (raw) => { try { return parseJsonStrict(raw)?.spec === 'FRACTALAI-key-directory-v1'; } catch { return false; } };
+  let first;
+  try { first = await fetchText(url); } catch (e) { first = e; }
+  if (typeof first === 'string' && isLegacy(first)) return first;
+  const alternate = new URL('/.well-known/fractalai-key-directory', url).href;
+  if (alternate === url) {
+    if (first instanceof Error) throw first;
+    throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
+  }
+  const raw = await fetchText(alternate);
+  if (!isLegacy(raw)) throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
+  return raw;
+}
+
 /** A value that is either inline JSON or a workspace file holding JSON (returned raw, never re-serialised). */
 function jsonOrFile(name) {
   const v = getInput(name);
@@ -263,7 +279,7 @@ async function buildCall() {
 
   // ── trust source: pinned set (override) or the key directory (verified against the pinned roots) ──
   if (opts.trustedKeys === undefined && directoryInput !== '') {
-    opts.directory = isHttpUrl(directoryInput) ? await fetchText(directoryInput) : readRaw(directoryInput);
+    opts.directory = isHttpUrl(directoryInput) ? await fetchLegacyDirectoryText(directoryInput) : readRaw(directoryInput);
     const hist = directoryHistory(getInput('directory-history'));
     if (hist !== undefined) opts.directoryHistory = hist;
   }

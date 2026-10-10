@@ -409,7 +409,7 @@ async function fetchJsonStrict(url, opts = {}) {
   return parseJsonStrict(await boundedFetch(url, { ...opts, headers: { accept: 'application/json', ...(opts.headers || {}) } }));
 }
 
-;// CONCATENATED MODULE: ./node_modules/@noble/hashes/utils.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/utils.js
 /**
  * Checks if something is Uint8Array. Be careful: nodejs Buffer will return true.
  * @param a - value to test
@@ -988,7 +988,7 @@ const utils_oidNist = (suffix) => ({
     oid: Uint8Array.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, suffix]),
 });
 //# sourceMappingURL=utils.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/curves/utils.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/utils.js
 /**
  * Hex, bytes and number utilities.
  * @module
@@ -1587,7 +1587,7 @@ const notImplemented = () => {
     throw new Error('not implemented');
 };
 //# sourceMappingURL=utils.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/hashes/_u64.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/_u64.js
 const U32_MASK64 = /* @__PURE__ */ BigInt(2 ** 32 - 1);
 const _32n = /* @__PURE__ */ BigInt(32);
 // Split bigint into two 32-bit halves. With `le=true`, returned fields become `{ h: low, l: high
@@ -1672,7 +1672,7 @@ const u64 = {
 // Default export mirrors named `u64` for compatibility with object-style imports.
 /* harmony default export */ const _u64 = ((/* unused pure expression or super */ null && (u64)));
 //# sourceMappingURL=_u64.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/hashes/sha3.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/sha3.js
 /**
  * SHA3 (keccak) hash function, based on a new "Sponge function" design.
  * Different from older hashes, the internal state is bigger than output size.
@@ -2104,7 +2104,7 @@ const shake256_64 =
 /* @__PURE__ */
 (/* unused pure expression or super */ null && (genShake(0x1f, 136, 64, /* @__PURE__ */ oidNist(0x0c))));
 //# sourceMappingURL=sha3.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/fft.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/fft.js
 function checkU32(n) {
     // 0xff_ff_ff_ff
     if (!Number.isSafeInteger(n) || n < 0 || n > 0xffffffff)
@@ -2673,7 +2673,7 @@ function poly(field, roots, create, fft, length) {
     };
 }
 //# sourceMappingURL=fft.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/post-quantum/utils.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/post-quantum/utils.js
 /**
  * Utilities for hex, bytearray and number handling.
  * @module
@@ -3065,7 +3065,7 @@ function getMessagePrehash(hash, msg, ctx = EMPTY) {
     return utils_concatBytes(new Uint8Array([1, ctx.length]), ctx, hash.oid, hashed);
 }
 //# sourceMappingURL=utils.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/post-quantum/_crystals.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/post-quantum/_crystals.js
 /**
  * Internal methods for lattice-based ML-KEM and ML-DSA.
  * @module
@@ -3267,7 +3267,7 @@ const _crystals_XOF128 = /* @__PURE__ */ createXofShake(shake128);
  */
 const _crystals_XOF256 = /* @__PURE__ */ createXofShake(shake256);
 //# sourceMappingURL=_crystals.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/post-quantum/ml-dsa.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/post-quantum/ml-dsa.js
 /**
  * ML-DSA: Module Lattice-based Digital Signature Algorithm from
  * [FIPS-204](https://csrc.nist.gov/pubs/fips/204/ipd). A.k.a. CRYSTALS-Dilithium.
@@ -3930,7 +3930,7 @@ const ml_dsa87 = /* @__PURE__ */ (/* unused pure expression or super */ null && 
     securityLevel: 256,
 }))()));
 //# sourceMappingURL=ml-dsa.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/hashes/_md.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/_md.js
 /**
  * Internal Merkle-Damgard hash utils.
  * @module
@@ -4133,7 +4133,7 @@ const SHA512_IV = /* @__PURE__ */ Uint32Array.from([
     0x510e527f, 0xade682d1, 0x9b05688c, 0x2b3e6c1f, 0x1f83d9ab, 0xfb41bd6b, 0x5be0cd19, 0x137e2179,
 ]);
 //# sourceMappingURL=_md.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/hashes/sha2.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/sha2.js
 /**
  * SHA2 hash function. A.k.a. sha256, sha384, sha512, sha512_224, sha512_256.
  * SHA256 is the fastest hash implementable in JS, even faster than Blake3.
@@ -4592,7 +4592,7 @@ const sha512_256 = /* @__PURE__ */ (/* unused pure expression or super */ null &
 const sha512_224 = /* @__PURE__ */ (/* unused pure expression or super */ null && (createHasher(() => new _SHA512_224(), 
 /* @__PURE__ */ oidNist(0x05))));
 //# sourceMappingURL=sha2.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/modular.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/modular.js
 /**
  * Utils for modular division and fields.
  * Field over 11 is a finite (Galois) field is integer number operations `mod 11`.
@@ -5443,7 +5443,7 @@ function mapHashToField(key, fieldOrder, isLE = false) {
     return isLE ? numberToBytesLE(reduced, fieldLen) : numberToBytesBE(reduced, fieldLen);
 }
 //# sourceMappingURL=modular.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/curve.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/curve.js
 /**
  * Methods for elliptic curve multiplication by scalars.
  * Contains wNAF, pippenger.
@@ -6055,7 +6055,7 @@ function createKeygen(randomSecretKey, getPublicKey) {
     };
 }
 //# sourceMappingURL=curve.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/edwards.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/edwards.js
 /**
  * Twisted Edwards curve. The formula is: ax² + y² = 1 + dx²y².
  * For design rationale of types / exports, see weierstrass module documentation.
@@ -6749,7 +6749,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     });
 }
 //# sourceMappingURL=edwards.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/hash-to-curve.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/hash-to-curve.js
 
 
 // Octet Stream to Integer. "spec" implementation of os2ip is 2.5x slower vs bytesToNumberBE.
@@ -7096,7 +7096,7 @@ function hash_to_curve_createHasher(Point, mapToCurve, defaults) {
     });
 }
 //# sourceMappingURL=hash-to-curve.js.map
-;// CONCATENATED MODULE: ./node_modules/@noble/curves/ed25519.js
+;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/ed25519.js
 /**
  * ed25519 Twisted Edwards curve with following addons:
  * - X25519 ECDH
@@ -9064,6 +9064,22 @@ async function fetchText(url) {
     await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
   }
 }
+/** Fixed same-origin relocation, matching Trust Kernel 2.3 locate.mjs. Pins remain unchanged. */
+async function fetchLegacyDirectoryText(url) {
+  const isLegacy = (raw) => { try { return parseJsonStrict(raw)?.spec === 'FRACTALAI-key-directory-v1'; } catch { return false; } };
+  let first;
+  try { first = await fetchText(url); } catch (e) { first = e; }
+  if (typeof first === 'string' && isLegacy(first)) return first;
+  const alternate = new URL('/.well-known/fractalai-key-directory', url).href;
+  if (alternate === url) {
+    if (first instanceof Error) throw first;
+    throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
+  }
+  const raw = await fetchText(alternate);
+  if (!isLegacy(raw)) throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
+  return raw;
+}
+
 /** A value that is either inline JSON or a workspace file holding JSON (returned raw, never re-serialised). */
 function jsonOrFile(name) {
   const v = getInput(name);
@@ -9200,7 +9216,7 @@ async function buildCall() {
 
   // ── trust source: pinned set (override) or the key directory (verified against the pinned roots) ──
   if (opts.trustedKeys === undefined && directoryInput !== '') {
-    opts.directory = isHttpUrl(directoryInput) ? await fetchText(directoryInput) : readRaw(directoryInput);
+    opts.directory = isHttpUrl(directoryInput) ? await fetchLegacyDirectoryText(directoryInput) : readRaw(directoryInput);
     const hist = directoryHistory(getInput('directory-history'));
     if (hist !== undefined) opts.directoryHistory = hist;
   }

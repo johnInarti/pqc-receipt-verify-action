@@ -197,3 +197,7 @@ only from its root, so a subdirectory action can never appear there.
 The old path still works. `readiness-scan/` keeps a forwarder with the same inputs and outputs, so
 a workflow already pinned to `…/readiness-scan@v2.1.0` keeps running and keeps receiving
 improvements. See [`readiness-scan/README.md`](readiness-scan/README.md).
+
+Legacy directory relocation: when the configured URL serves a different spec, the Action
+fetches `/.well-known/fractalai-key-directory` on that same origin. It follows no
+document-supplied pointer and retains the pinned governance key and checkpoint.
