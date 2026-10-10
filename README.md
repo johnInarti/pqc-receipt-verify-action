@@ -5,9 +5,9 @@ and reports a **leveled verdict**: `integrity → authentic → trusted → time
 It fails the job unless every level you `require` holds.
 
 v2 makes **no trust decision of its own.** Every decision is taken by
-[Trust Kernel v2](https://github.com/johnInarti/pqc-receipts-colosseum/blob/b9e1967e9d6c6825e025f701a6752eac95c2f2e7/spec/TRUST-KERNEL.md),
+[Trust Kernel v2](https://github.com/johnInarti/pqc-receipts-colosseum/blob/df081e835c3c341f288495ee675d6b1bfdf39b96/spec/TRUST-KERNEL.md),
 the single reference implementation, **vendored byte-exact** at commit
-[`b9e1967`](https://github.com/johnInarti/pqc-receipts-colosseum/tree/b9e1967e9d6c6825e025f701a6752eac95c2f2e7)
+[`df081e8`](https://github.com/johnInarti/pqc-receipts-colosseum/tree/df081e835c3c341f288495ee675d6b1bfdf39b96)
 (`vendor/pqc-receipts-colosseum/`, listed file by file with git blob ids in `vendor/VENDOR.json`) and bundled into
 `dist/index.js` with ncc. `src/index.js` only reads inputs, hands raw bytes and an explicit policy to the kernel,
 and publishes its verdict. The kernel's whole adversarial corpus (129 vectors) is run **through the Action** in CI.
@@ -48,7 +48,7 @@ With an on-chain time proof (the receipt existed by a finalized block time on Ar
 | `time_anchored` | A `ReceiptAnchored` event from the **pinned** contract + runtime code hash (Arc 5042, Arbitrum One 42161) or an SPL Memo from an announced Solana signer binds this receipt's signature, payload hash, kid and signed time to a block whose **header** time is ≥ the signed time | `ANCHOR_*`, `RPC_DISAGREEMENT`, `SOL_*` |
 | `finalized` | That anchor is in a finalized block (every configured RPC agrees) | `NOT_FINALIZED` |
 
-`time_anchored` / `finalized` are `""` (not evaluated) unless `anchors: true` or `require` names them.
+`time_anchored` / `finalized` are `""` (not evaluated) unless `anchors: true` or `require` names them; `onchain` likewise unless `onchain: true` or `require` names it.
 
 ## Inputs
 
@@ -58,6 +58,8 @@ With an on-chain time proof (the receipt existed by a finalized block time on Ar
 | `kind` | `midas-alert` | Expected kind(s), comma-separated: `midas-alert`, `x402-seal`, `acp-verdict`, `served-proof`, `self-attest-seal`. **Policy, never read from the document.** `''` → refused (`KIND_UNKNOWN`). |
 | `require` | `integrity,authentic,trusted` | Levels that must all be true for `valid=true`. `integrity` is always added. |
 | `anchors` | `false` | Evaluate time proofs (implied by `require` containing `time_anchored`/`finalized`). |
+| `onchain` | `false` | Evaluate level `onchain`: re-read the on-chain facts a receipt asserts (e.g. `latam-stablecoin-receipt`); implied by `require` containing `onchain`. |
+| `allow-unfinalized-payment` | `false` | For `onchain`: accept a confirmed but not yet finalized payment block. |
 | `anchor-refs` | `''` | Anchor hints: inline JSON or a workspace file (object or array ≤ 8). Default: the receipt's `anchor`/`anchors`. Hints only — every fact comes from the chain. |
 | `rpc` | `''` | `CHAIN=URL` per line (`eip155:5042=https://…`, `solana:devnet=https://…`). Several URLs per chain are cross-checked and must agree. Default: the pinned `default_rpc` of each deployment. |
 | `allow-testnet-anchors` | `false` | Count test-network anchors (they stay `network_class=test`). |
@@ -152,7 +154,7 @@ To reproduce v1's TLS-only trust explicitly: `allow-tls-directory: true` (report
 
 ```bash
 npm ci                                       # Node 20; exact @noble versions = the kernel's lockfile
-npm run vendor:check                         # vendored kernel == VENDOR.json (git blob ids of b9e1967)
+npm run vendor:check                         # vendored kernel == VENDOR.json (git blob ids of df081e8)
 node scripts/vendor-kernel.mjs --upstream    # same, against a fresh clone of the upstream commit (network)
 npm test                                     # 53 tests, offline: migrated v1 unit tests, RT-1..RT-13, red-team PoCs,
                                              # and the 129-vector corpus THROUGH dist/index.js
@@ -198,6 +200,7 @@ The old path still works. `readiness-scan/` keeps a forwarder with the same inpu
 a workflow already pinned to `…/readiness-scan@v2.1.0` keeps running and keeps receiving
 improvements. See [`readiness-scan/README.md`](readiness-scan/README.md).
 
-Legacy directory relocation: when the configured URL serves a different spec, the Action
+Legacy directory relocation: when the configured URL serves a different spec (the x402
+delivery-receipt format now owns `/.well-known/x402-receipt-keys`), the vendored Trust Kernel 2.3
 fetches `/.well-known/fractalai-key-directory` on that same origin. It follows no
 document-supplied pointer and retains the pinned governance key and checkpoint.

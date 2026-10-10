@@ -1,6 +1,6 @@
 {
   "name": "pqc-receipt-verify-action",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "description": "GitHub Action: verify FractalAI post-quantum (ML-DSA-65 / FIPS 204) receipts with Trust Kernel v2 (vendored, pinned roots, leveled verdict), fail-closed.",

@@ -24,7 +24,7 @@ test('baseline: genuine receipt + pinned key -> valid=true, exit 0, every output
   const ws = workspace({ 'r.json': GENUINE });
   const r = await run(ws, { ...OFFLINE, receipt: 'r.json', 'trusted-keys': PINNED });
   assert.equal(r.code, 0, r.log); assert.equal(r.out.valid, 'true'); assert.equal(r.out.kid, '86c139c960bb274c');
-  assert.deepEqual(Object.keys(r.out).sort(), ['authentic', 'codes', 'epoch', 'exit-code', 'finalized', 'integrity', 'kid', 'kind', 'reason', 'time_anchored', 'trust-basis', 'trusted', 'valid'].sort());
+  assert.deepEqual(Object.keys(r.out).sort(), ['authentic', 'codes', 'epoch', 'exit-code', 'finalized', 'integrity', 'kid', 'kind', 'onchain', 'reason', 'time_anchored', 'trust-basis', 'trusted', 'valid'].sort());
 });
 
 test('RT-10: valid=false is the FIRST output written (fail-closed before any work)', async () => {
@@ -44,7 +44,7 @@ test('RT-1/RT-2: newline + workflow-command payload in a receipt field cannot in
   const sumLines = r.sum.split('\n');
   assert.equal(sumLines.filter((l) => l.startsWith('#')).length, 1, `injected heading:\n${r.sum}`);
   assert.ok(!sumLines.some((l) => /^\s*::|^\| valid \| true/.test(l)), `summary broken:\n${r.sum}`);
-  assert.equal(sumLines.filter((l) => l.startsWith('|')).length, 16, `table rows changed:\n${r.sum}`);
+  assert.equal(sumLines.filter((l) => l.startsWith('|')).length, 17, `table rows changed:\n${r.sum}`);
   assert.ok(!r.sum.includes('<img'), 'raw HTML in summary');
   assert.ok(!/[\u2028\u2029\u202e]/.test(r.log + r.sum), 'line separator / bidi override reached the log');
 });

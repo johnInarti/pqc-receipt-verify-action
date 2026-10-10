@@ -16,6 +16,10 @@ inputs:
     description: 'Levels that must ALL be true for valid=true (comma-separated): integrity, authentic, trusted, time_anchored, finalized. integrity is always included.'
     required: false
     default: 'integrity,authentic,trusted'
+  onchain:
+    description: 'Evaluate level onchain (kinds with on-chain facts, e.g. latam-stablecoin-receipt: the transfer is re-read from the chain). Implied when require names onchain.'
+    required: false
+    default: 'false'
   anchors:
     description: 'Evaluate on-chain time proofs (EVM PQCReceiptAnchor on the pinned deployments, Solana SPL Memo). Implied when require names time_anchored or finalized.'
     required: false
@@ -30,6 +34,10 @@ inputs:
     default: ''
   allow-testnet-anchors:
     description: 'Count test-network anchors (e.g. Solana devnet) as time proofs. They stay marked network_class=test.'
+    required: false
+    default: 'false'
+  allow-unfinalized-payment:
+    description: 'For onchain: accept a payment whose block is confirmed but not yet finalized (policy.allowUnfinalizedPayment). Default false = finalized only.'
     required: false
     default: 'false'
   require-known-anchorer:
@@ -99,6 +107,8 @@ outputs:
     description: 'Level 3 — the key is authorized at the signed time by the pinned roots (or by an override) ("true"/"false").'
   time_anchored:
     description: 'Level 4 — a counted on-chain anchor proves the signed bytes existed by a block time ("true"/"false"; "" when anchors were not evaluated).'
+  onchain:
+    description: 'Level 6 — the on-chain facts a receipt asserts were re-read from the chain and match ("true"/"false"; "" when not evaluated).'
   finalized:
     description: 'Level 5 — that anchor is in a finalized block ("true"/"false"; "" when not evaluated).'
   trust-basis:

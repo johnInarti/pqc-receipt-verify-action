@@ -19,11 +19,13 @@ const external_node_path_namespaceObject = __WEBPACK_EXTERNAL_createRequire(impo
  * implementation (JS, Python, …) MUST emit the same code for the same failure.
  */
 const KERNEL_ID = 'fractalai-trust-kernel/2';
-const SPEC_VERSION = '2.0.0';
+const SPEC_VERSION = '2.2.0';
 
 /** Ordered verdict levels. Each level implies the ones before it except time_anchored/finalized, which
- * imply `authentic` (an anchor proves existence of signed bytes, independently of key trust). */
-const LEVELS = Object.freeze(['integrity', 'authentic', 'trusted', 'time_anchored', 'finalized']);
+ * imply `authentic` (an anchor proves existence of signed bytes, independently of key trust), and
+ * `onchain` (spec 2.1, §12.4), which implies `authentic` and is evaluated only for kinds that describe an
+ * on-chain fact (latam-stablecoin-receipt): every signed payment fact recomputed from the chain. */
+const LEVELS = Object.freeze(['integrity', 'authentic', 'trusted', 'time_anchored', 'finalized', 'onchain']);
 
 /** Default policy: a receipt is `valid` when it is authentic AND signed by a key the pinned roots authorize. */
 const DEFAULT_REQUIRE = Object.freeze(['integrity', 'authentic', 'trusted']);
@@ -31,10 +33,10 @@ const DEFAULT_REQUIRE = Object.freeze(['integrity', 'authentic', 'trusted']);
 /** CLI exit codes: 0 valid; 1x = first required level that failed; 2 usage; 3 input could not be read/parsed. */
 const EXIT = Object.freeze({
   VALID: 0, USAGE: 2, INPUT: 3,
-  integrity: 10, authentic: 11, trusted: 12, time_anchored: 13, finalized: 14,
+  integrity: 10, authentic: 11, trusted: 12, time_anchored: 13, finalized: 14, onchain: 15,
 });
 
-const C = Object.freeze({
+const codes_C = Object.freeze({
   // input hygiene
   JSON_INVALID: 'JSON_INVALID', JSON_DUPLICATE_KEY: 'JSON_DUPLICATE_KEY', JSON_TOO_DEEP: 'JSON_TOO_DEEP',
   JSON_TOO_LARGE: 'JSON_TOO_LARGE', JSON_LONE_SURROGATE: 'JSON_LONE_SURROGATE', INPUT_SHAPE: 'INPUT_SHAPE',
@@ -78,6 +80,20 @@ const C = Object.freeze({
   KIND_AMBIGUOUS: 'KIND_AMBIGUOUS', KIND_NOT_ALLOWED: 'KIND_NOT_ALLOWED',
   ENGINE_SELFTEST_FAILED: 'ENGINE_SELFTEST_FAILED', ENGINE_UNSAFE_OBJECT_INPUT: 'ENGINE_UNSAFE_OBJECT_INPUT',
   SNAPSHOT_MISMATCH: 'SNAPSHOT_MISMATCH',
+  // latam-stablecoin-receipt (spec §12): integrity
+  REGISTRY_INVALID: 'REGISTRY_INVALID', TOKEN_NOT_PINNED: 'TOKEN_NOT_PINNED', TOKEN_METADATA_MISMATCH: 'TOKEN_METADATA_MISMATCH',
+  AMOUNT_FORMAT_MISMATCH: 'AMOUNT_FORMAT_MISMATCH', PAYMENT_NOT_A_TRANSFER: 'PAYMENT_NOT_A_TRANSFER',
+  // latam-stablecoin-receipt: onchain
+  ONCHAIN_NOT_APPLICABLE: 'ONCHAIN_NOT_APPLICABLE', ONCHAIN_NOT_CHECKED: 'ONCHAIN_NOT_CHECKED', PAYMENT_NO_RPC: 'PAYMENT_NO_RPC',
+  PAYMENT_WRONG_CHAIN: 'PAYMENT_WRONG_CHAIN', PAYMENT_TX_NOT_FOUND: 'PAYMENT_TX_NOT_FOUND', PAYMENT_TX_REVERTED: 'PAYMENT_TX_REVERTED',
+  PAYMENT_LOG_NOT_FOUND: 'PAYMENT_LOG_NOT_FOUND', PAYMENT_LOG_WRONG_CONTRACT: 'PAYMENT_LOG_WRONG_CONTRACT',
+  PAYMENT_LOG_NOT_TRANSFER: 'PAYMENT_LOG_NOT_TRANSFER', PAYMENT_LOG_REMOVED: 'PAYMENT_LOG_REMOVED',
+  PAYMENT_BLOCK_MISMATCH: 'PAYMENT_BLOCK_MISMATCH', PAYMENT_REORGED: 'PAYMENT_REORGED', PAYMENT_TIME_MISMATCH: 'PAYMENT_TIME_MISMATCH',
+  PAYMENT_PARTY_MISMATCH: 'PAYMENT_PARTY_MISMATCH', PAYMENT_AMOUNT_MISMATCH: 'PAYMENT_AMOUNT_MISMATCH',
+  PAYMENT_TOKEN_METADATA: 'PAYMENT_TOKEN_METADATA', PAYMENT_CONFIRMATIONS: 'PAYMENT_CONFIRMATIONS',
+  PAYMENT_NOT_FINALIZED: 'PAYMENT_NOT_FINALIZED', PAYMENT_RPC_MALFORMED: 'PAYMENT_RPC_MALFORMED',
+  // agent-commerce-receipt (spec §13): integrity
+  COMMERCE_MALFORMED: 'COMMERCE_MALFORMED',
   INTERNAL: 'INTERNAL',
 });
 
@@ -89,7 +105,7 @@ class codes_KernelError extends Error {
     this.detail = detail;
   }
 }
-const fail = (code, detail) => { throw new codes_KernelError(code, detail); };
+const codes_fail = (code, detail) => { throw new codes_KernelError(code, detail); };
 
 ;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/hygiene.mjs
 /**
@@ -125,15 +141,15 @@ function parseJsonStrict(input, limits = {}) {
   let text;
   if (typeof input === 'string') text = input;
   else if (input instanceof Uint8Array) {
-    if (input.length > L.MAX_JSON_BYTES) fail(C.JSON_TOO_LARGE, `input is ${input.length} bytes (> ${L.MAX_JSON_BYTES})`);
-    try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(input); } catch { fail(C.JSON_INVALID, 'input is not valid UTF-8'); }
-  } else fail(C.JSON_INVALID, 'input is not text');
+    if (input.length > L.MAX_JSON_BYTES) codes_fail(codes_C.JSON_TOO_LARGE, `input is ${input.length} bytes (> ${L.MAX_JSON_BYTES})`);
+    try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(input); } catch { codes_fail(codes_C.JSON_INVALID, 'input is not valid UTF-8'); }
+  } else codes_fail(codes_C.JSON_INVALID, 'input is not text');
   // UTF-8 length bound (cheap upper bound first, exact second)
-  if (text.length > L.MAX_JSON_BYTES || new TextEncoder().encode(text).length > L.MAX_JSON_BYTES) fail(C.JSON_TOO_LARGE, `input exceeds ${L.MAX_JSON_BYTES} bytes`);
-  if (text.charCodeAt(0) === 0xfeff) fail(C.JSON_INVALID, 'byte-order mark not allowed');
+  if (text.length > L.MAX_JSON_BYTES || new TextEncoder().encode(text).length > L.MAX_JSON_BYTES) codes_fail(codes_C.JSON_TOO_LARGE, `input exceeds ${L.MAX_JSON_BYTES} bytes`);
+  if (text.charCodeAt(0) === 0xfeff) codes_fail(codes_C.JSON_INVALID, 'byte-order mark not allowed');
   let i = 0, nodes = 0;
   const n = text.length;
-  const err = (m) => fail(C.JSON_INVALID, `${m} at offset ${i}`);
+  const err = (m) => codes_fail(codes_C.JSON_INVALID, `${m} at offset ${i}`);
   const ws = () => { while (i < n) { const c = text.charCodeAt(i); if (c === 0x20 || c === 0x0a || c === 0x0d || c === 0x09) i++; else break; } };
   const str = () => {
     i++; // opening quote
@@ -146,10 +162,10 @@ function parseJsonStrict(input, limits = {}) {
       if (c < 0x20) err('control character in string');
       if (isHighSur(c)) {
         const d = text.charCodeAt(i + 1);
-        if (!isLowSur(d)) fail(C.JSON_LONE_SURROGATE, `lone high surrogate at offset ${i}`);
+        if (!isLowSur(d)) codes_fail(codes_C.JSON_LONE_SURROGATE, `lone high surrogate at offset ${i}`);
         i += 2; continue;
       }
-      if (isLowSur(c)) fail(C.JSON_LONE_SURROGATE, `lone low surrogate at offset ${i}`);
+      if (isLowSur(c)) codes_fail(codes_C.JSON_LONE_SURROGATE, `lone low surrogate at offset ${i}`);
       if (c === 0x5c) {
         out += text.slice(start, i);
         const e = text[i + 1];
@@ -163,18 +179,18 @@ function parseJsonStrict(input, limits = {}) {
           const cu = parseInt(hex, 16); i += 4;
           if (isHighSur(cu)) {
             const hex2 = text.slice(i, i + 6);
-            if (!/^\\u[0-9a-fA-F]{4}$/.test(hex2) || !isLowSur(parseInt(hex2.slice(2), 16))) fail(C.JSON_LONE_SURROGATE, `lone high surrogate escape at offset ${i - 6}`);
+            if (!/^\\u[0-9a-fA-F]{4}$/.test(hex2) || !isLowSur(parseInt(hex2.slice(2), 16))) codes_fail(codes_C.JSON_LONE_SURROGATE, `lone high surrogate escape at offset ${i - 6}`);
             out += String.fromCharCode(cu, parseInt(hex2.slice(2), 16)); i += 6;
-          } else if (isLowSur(cu)) fail(C.JSON_LONE_SURROGATE, `lone low surrogate escape at offset ${i - 6}`);
+          } else if (isLowSur(cu)) codes_fail(codes_C.JSON_LONE_SURROGATE, `lone low surrogate escape at offset ${i - 6}`);
           else out += String.fromCharCode(cu);
         } else err('bad escape');
         start = i;
-        if (out.length > L.MAX_STRING) fail(C.JSON_TOO_LARGE, 'string too long');
+        if (out.length > L.MAX_STRING) codes_fail(codes_C.JSON_TOO_LARGE, 'string too long');
         continue;
       }
       i++;
     }
-    if (out.length > L.MAX_STRING) fail(C.JSON_TOO_LARGE, 'string too long');
+    if (out.length > L.MAX_STRING) codes_fail(codes_C.JSON_TOO_LARGE, 'string too long');
     return out;
   };
   const num = () => {
@@ -186,8 +202,8 @@ function parseJsonStrict(input, limits = {}) {
     return v;
   };
   const value = (depth) => {
-    if (depth > L.MAX_DEPTH) fail(C.JSON_TOO_DEEP, `nesting depth exceeds ${L.MAX_DEPTH}`);
-    if (++nodes > L.MAX_NODES) fail(C.JSON_TOO_LARGE, `more than ${L.MAX_NODES} JSON nodes`);
+    if (depth > L.MAX_DEPTH) codes_fail(codes_C.JSON_TOO_DEEP, `nesting depth exceeds ${L.MAX_DEPTH}`);
+    if (++nodes > L.MAX_NODES) codes_fail(codes_C.JSON_TOO_LARGE, `more than ${L.MAX_NODES} JSON nodes`);
     ws();
     const c = text[i];
     if (c === '{') {
@@ -196,7 +212,7 @@ function parseJsonStrict(input, limits = {}) {
       for (;;) {
         ws(); if (text[i] !== '"') err('expected object key');
         const k = str();
-        if (Object.prototype.hasOwnProperty.call(obj, k)) fail(C.JSON_DUPLICATE_KEY, `duplicate key ${JSON.stringify(k).slice(0, 80)}`);
+        if (Object.prototype.hasOwnProperty.call(obj, k)) codes_fail(codes_C.JSON_DUPLICATE_KEY, `duplicate key ${JSON.stringify(k).slice(0, 80)}`);
         ws(); if (text[i] !== ':') err('expected :'); i++;
         obj[k] = value(depth + 1);
         ws();
@@ -233,34 +249,34 @@ function assertJsonValue(v, limits = {}) {
   const L = { ...LIMITS, ...limits };
   let nodes = 0;
   const walk = (x, d) => {
-    if (d > L.MAX_DEPTH) fail(C.JSON_TOO_DEEP, `nesting depth exceeds ${L.MAX_DEPTH}`);
-    if (++nodes > L.MAX_NODES) fail(C.JSON_TOO_LARGE, `more than ${L.MAX_NODES} JSON nodes`);
+    if (d > L.MAX_DEPTH) codes_fail(codes_C.JSON_TOO_DEEP, `nesting depth exceeds ${L.MAX_DEPTH}`);
+    if (++nodes > L.MAX_NODES) codes_fail(codes_C.JSON_TOO_LARGE, `more than ${L.MAX_NODES} JSON nodes`);
     if (x === null || typeof x === 'boolean') return;
-    if (typeof x === 'number') { if (!Number.isFinite(x)) fail(C.INPUT_SHAPE, 'non-finite number'); return; }
+    if (typeof x === 'number') { if (!Number.isFinite(x)) codes_fail(codes_C.INPUT_SHAPE, 'non-finite number'); return; }
     if (typeof x === 'string') {
-      if (x.length > L.MAX_STRING) fail(C.JSON_TOO_LARGE, 'string too long');
+      if (x.length > L.MAX_STRING) codes_fail(codes_C.JSON_TOO_LARGE, 'string too long');
       for (let k = 0; k < x.length; k++) {
         const c = x.charCodeAt(k);
-        if (isHighSur(c)) { if (!isLowSur(x.charCodeAt(k + 1))) fail(C.JSON_LONE_SURROGATE, 'lone surrogate in string'); k++; }
-        else if (isLowSur(c)) fail(C.JSON_LONE_SURROGATE, 'lone surrogate in string');
+        if (isHighSur(c)) { if (!isLowSur(x.charCodeAt(k + 1))) codes_fail(codes_C.JSON_LONE_SURROGATE, 'lone surrogate in string'); k++; }
+        else if (isLowSur(c)) codes_fail(codes_C.JSON_LONE_SURROGATE, 'lone surrogate in string');
       }
       return;
     }
     if (Array.isArray(x)) { for (const y of x) walk(y, d + 1); return; }
     if (typeof x === 'object') {
       const proto = Object.getPrototypeOf(x);
-      if (proto !== null && proto !== Object.prototype) fail(C.INPUT_SHAPE, 'non-plain object');
+      if (proto !== null && proto !== Object.prototype) codes_fail(codes_C.INPUT_SHAPE, 'non-plain object');
       for (const k of Object.keys(x)) { walk(k, d + 1); walk(x[k], d + 1); }
       return;
     }
-    fail(C.INPUT_SHAPE, `unsupported JSON type ${typeof x}`);
+    codes_fail(codes_C.INPUT_SHAPE, `unsupported JSON type ${typeof x}`);
   };
   walk(v, 0);
   return v;
 }
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-const own = (o, k) => isPlainObject(o) && Object.prototype.hasOwnProperty.call(o, k);
+const hygiene_own = (o, k) => isPlainObject(o) && Object.prototype.hasOwnProperty.call(o, k);
 
 const B64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const B64_DEC = (() => { const t = new Int16Array(128).fill(-1); const a = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; for (let k = 0; k < 64; k++) t[a.charCodeAt(k)] = k; return t; })();
@@ -281,7 +297,7 @@ function b64encode(bytes) {
 /** Canonical RFC 4648 \u00a74 base64 only: padded, standard alphabet, no whitespace, zero padding bits
  * (decode→encode must round-trip, so one byte string has exactly one accepted text form). */
 function b64decodeStrict(s, expectedLen, what = 'value') {
-  if (typeof s !== 'string' || s.length === 0 || !B64_RE.test(s)) fail(C.B64_NONCANONICAL, `${what} is not canonical base64`);
+  if (typeof s !== 'string' || s.length === 0 || !B64_RE.test(s)) codes_fail(codes_C.B64_NONCANONICAL, `${what} is not canonical base64`);
   const pad = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
   const out = new Uint8Array((s.length / 4) * 3 - pad);
   let o = 0;
@@ -293,9 +309,9 @@ function b64decodeStrict(s, expectedLen, what = 'value') {
     if (o < out.length) out[o++] = (v >> 8) & 255;
     if (o < out.length) out[o++] = v & 255;
   }
-  if (b64encode(out) !== s) fail(C.B64_NONCANONICAL, `${what} has non-zero padding bits`);
+  if (b64encode(out) !== s) codes_fail(codes_C.B64_NONCANONICAL, `${what} has non-zero padding bits`);
   if (expectedLen !== undefined && out.length !== expectedLen) {
-    fail(expectedLen === 1952 ? C.KEY_SIZE : expectedLen === 3309 ? C.SIG_SIZE : C.INPUT_SHAPE, `${what} is ${out.length} bytes, expected ${expectedLen}`);
+    codes_fail(expectedLen === 1952 ? codes_C.KEY_SIZE : expectedLen === 3309 ? codes_C.SIG_SIZE : codes_C.INPUT_SHAPE, `${what} is ${out.length} bytes, expected ${expectedLen}`);
   }
   return out;
 }
@@ -305,7 +321,7 @@ const isHex0x = (s, len) => typeof s === 'string' && new RegExp(`^0x[0-9a-fA-F]{
 const isSafeUint = (v) => Number.isSafeInteger(v) && v >= 0;
 function hexToBytes(h) {
   const s = h.startsWith('0x') ? h.slice(2) : h;
-  if (s.length % 2 || !/^[0-9a-fA-F]*$/.test(s)) fail(C.INPUT_SHAPE, 'bad hex');
+  if (s.length % 2 || !/^[0-9a-fA-F]*$/.test(s)) codes_fail(codes_C.INPUT_SHAPE, 'bad hex');
   const out = new Uint8Array(s.length / 2);
   for (let k = 0; k < out.length; k++) out[k] = parseInt(s.slice(2 * k, 2 * k + 2), 16);
   return out;
@@ -313,9 +329,9 @@ function hexToBytes(h) {
 const bytesToHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 /** JSON-RPC quantity: 0x-prefixed hex without leading zeros (we accept leading zeros, but nothing else). */
 function qty(h, what = 'quantity') {
-  if (typeof h !== 'string' || !/^0x[0-9a-fA-F]{1,16}$/.test(h)) fail(C.ANCHOR_LOG_MALFORMED, `${what} is not a hex quantity`);
+  if (typeof h !== 'string' || !/^0x[0-9a-fA-F]{1,16}$/.test(h)) codes_fail(codes_C.ANCHOR_LOG_MALFORMED, `${what} is not a hex quantity`);
   const v = Number.parseInt(h.slice(2), 16);
-  if (!Number.isSafeInteger(v)) fail(C.ANCHOR_LOG_MALFORMED, `${what} out of range`);
+  if (!Number.isSafeInteger(v)) codes_fail(codes_C.ANCHOR_LOG_MALFORMED, `${what} out of range`);
   return v;
 }
 const toQty = (n) => '0x' + n.toString(16);
@@ -342,11 +358,11 @@ function safeJson(v, space = 2) {
  */
 async function boundedFetch(url, { method = 'GET', headers = {}, body, timeoutMs = LIMITS.FETCH_TIMEOUT_MS, maxBytes = LIMITS.FETCH_MAX_BYTES, fetchImpl = globalThis.fetch, allowInsecureLoopback = true } = {}) {
   let u;
-  try { u = new URL(url); } catch { throw new codes_KernelError(C.RPC_ERROR, `invalid URL ${oneLine(url, 120)}`); }
+  try { u = new URL(url); } catch { throw new codes_KernelError(codes_C.RPC_ERROR, `invalid URL ${oneLine(url, 120)}`); }
   const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
   const custom = fetchImpl !== globalThis.fetch;
   if (!custom && u.protocol !== 'https:' && !(u.protocol === 'http:' && loopback && allowInsecureLoopback)) {
-    throw new codes_KernelError(C.RPC_ERROR, `refusing non-HTTPS URL ${oneLine(url, 120)}`);
+    throw new codes_KernelError(codes_C.RPC_ERROR, `refusing non-HTTPS URL ${oneLine(url, 120)}`);
   }
   const ctl = new AbortController();
   let timedOut = false;
@@ -358,17 +374,17 @@ async function boundedFetch(url, { method = 'GET', headers = {}, body, timeoutMs
   const timer = setTimeout(() => {
     timedOut = true;
     ctl.abort(new Error(`deadline ${timeoutMs} ms`));
-    rejectDeadline(new codes_KernelError(C.RPC_ERROR, `timeout after ${timeoutMs} ms (${oneLine(u.origin, 120)})`));
+    rejectDeadline(new codes_KernelError(codes_C.RPC_ERROR, `timeout after ${timeoutMs} ms (${oneLine(u.origin, 120)})`));
   }, timeoutMs);
   let reader = null;
   const work = (async () => {
     const res = await fetchImpl(url, { method, headers, body, signal: ctl.signal, redirect: 'error' });
-    if (!res || typeof res !== 'object') throw new codes_KernelError(C.RPC_ERROR, 'no response');
-    if (!res.ok) { try { await res.body?.cancel?.(); } catch { /* ignore */ } throw new codes_KernelError(C.RPC_ERROR, `HTTP ${res.status} from ${oneLine(u.origin, 120)}`); }
+    if (!res || typeof res !== 'object') throw new codes_KernelError(codes_C.RPC_ERROR, 'no response');
+    if (!res.ok) { try { await res.body?.cancel?.(); } catch { /* ignore */ } throw new codes_KernelError(codes_C.RPC_ERROR, `HTTP ${res.status} from ${oneLine(u.origin, 120)}`); }
     const ctype = res.headers?.get?.('content-type');
-    if (typeof ctype === 'string' && ctype !== '' && !/^application\/([a-z0-9.+-]*\+)?json\b/i.test(ctype.trim())) throw new codes_KernelError(C.RPC_ERROR, `unexpected content-type ${oneLine(ctype, 60)} (want application/json)`);
+    if (typeof ctype === 'string' && ctype !== '' && !/^application\/([a-z0-9.+-]*\+)?json\b/i.test(ctype.trim())) throw new codes_KernelError(codes_C.RPC_ERROR, `unexpected content-type ${oneLine(ctype, 60)} (want application/json)`);
     const len = Number(res.headers?.get?.('content-length'));
-    if (Number.isFinite(len) && len > maxBytes) throw new codes_KernelError(C.JSON_TOO_LARGE, `response larger than ${maxBytes} bytes`);
+    if (Number.isFinite(len) && len > maxBytes) throw new codes_KernelError(codes_C.JSON_TOO_LARGE, `response larger than ${maxBytes} bytes`);
     if (res.body && typeof res.body.getReader === 'function') {
       reader = res.body.getReader();
       const chunks = []; let total = 0;
@@ -376,27 +392,27 @@ async function boundedFetch(url, { method = 'GET', headers = {}, body, timeoutMs
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > maxBytes) throw new codes_KernelError(C.JSON_TOO_LARGE, `response larger than ${maxBytes} bytes`);
+        if (total > maxBytes) throw new codes_KernelError(codes_C.JSON_TOO_LARGE, `response larger than ${maxBytes} bytes`);
         chunks.push(value);
       }
       const all = new Uint8Array(total); let o = 0; for (const ch of chunks) { all.set(ch, o); o += ch.byteLength; }
-      try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(all); } catch { fail(C.JSON_INVALID, 'response body is not valid UTF-8'); } // BOM kept so parseJsonStrict rejects it (§8.1)
+      try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(all); } catch { codes_fail(codes_C.JSON_INVALID, 'response body is not valid UTF-8'); } // BOM kept so parseJsonStrict rejects it (§8.1)
     }
     if (typeof res.text === 'function') {
       const t = await res.text();
-      if (t.length > maxBytes) throw new codes_KernelError(C.JSON_TOO_LARGE, `response larger than ${maxBytes} bytes`);
+      if (t.length > maxBytes) throw new codes_KernelError(codes_C.JSON_TOO_LARGE, `response larger than ${maxBytes} bytes`);
       return t;
     }
     if (typeof res.json === 'function') return JSON.stringify(await res.json());
-    throw new codes_KernelError(C.RPC_ERROR, 'response has no body');
+    throw new codes_KernelError(codes_C.RPC_ERROR, 'response has no body');
   })();
   work.catch(() => {});
   try {
     return await Promise.race([work, deadline]);
   } catch (e) {
     if (e instanceof codes_KernelError) throw e;
-    if (timedOut) throw new codes_KernelError(C.RPC_ERROR, `timeout after ${timeoutMs} ms (${oneLine(u.origin, 120)})`);
-    throw new codes_KernelError(C.RPC_ERROR, `fetch ${oneLine(u.origin, 120)} failed: ${oneLine(e?.message ?? e, 200)}`);
+    if (timedOut) throw new codes_KernelError(codes_C.RPC_ERROR, `timeout after ${timeoutMs} ms (${oneLine(u.origin, 120)})`);
+    throw new codes_KernelError(codes_C.RPC_ERROR, `fetch ${oneLine(u.origin, 120)} failed: ${oneLine(e?.message ?? e, 200)}`);
   } finally {
     clearTimeout(timer);
     if (reader) { try { reader.cancel().catch(() => {}); } catch { /* ignore */ } }
@@ -409,7 +425,7 @@ async function fetchJsonStrict(url, opts = {}) {
   return parseJsonStrict(await boundedFetch(url, { ...opts, headers: { accept: 'application/json', ...(opts.headers || {}) } }));
 }
 
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/utils.js
+;// CONCATENATED MODULE: ./node_modules/@noble/hashes/utils.js
 /**
  * Checks if something is Uint8Array. Be careful: nodejs Buffer will return true.
  * @param a - value to test
@@ -988,7 +1004,7 @@ const utils_oidNist = (suffix) => ({
     oid: Uint8Array.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, suffix]),
 });
 //# sourceMappingURL=utils.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/utils.js
+;// CONCATENATED MODULE: ./node_modules/@noble/curves/utils.js
 /**
  * Hex, bytes and number utilities.
  * @module
@@ -1587,7 +1603,7 @@ const notImplemented = () => {
     throw new Error('not implemented');
 };
 //# sourceMappingURL=utils.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/_u64.js
+;// CONCATENATED MODULE: ./node_modules/@noble/hashes/_u64.js
 const U32_MASK64 = /* @__PURE__ */ BigInt(2 ** 32 - 1);
 const _32n = /* @__PURE__ */ BigInt(32);
 // Split bigint into two 32-bit halves. With `le=true`, returned fields become `{ h: low, l: high
@@ -1672,7 +1688,7 @@ const u64 = {
 // Default export mirrors named `u64` for compatibility with object-style imports.
 /* harmony default export */ const _u64 = ((/* unused pure expression or super */ null && (u64)));
 //# sourceMappingURL=_u64.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/sha3.js
+;// CONCATENATED MODULE: ./node_modules/@noble/hashes/sha3.js
 /**
  * SHA3 (keccak) hash function, based on a new "Sponge function" design.
  * Different from older hashes, the internal state is bigger than output size.
@@ -2104,7 +2120,7 @@ const shake256_64 =
 /* @__PURE__ */
 (/* unused pure expression or super */ null && (genShake(0x1f, 136, 64, /* @__PURE__ */ oidNist(0x0c))));
 //# sourceMappingURL=sha3.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/fft.js
+;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/fft.js
 function checkU32(n) {
     // 0xff_ff_ff_ff
     if (!Number.isSafeInteger(n) || n < 0 || n > 0xffffffff)
@@ -2673,7 +2689,7 @@ function poly(field, roots, create, fft, length) {
     };
 }
 //# sourceMappingURL=fft.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/post-quantum/utils.js
+;// CONCATENATED MODULE: ./node_modules/@noble/post-quantum/utils.js
 /**
  * Utilities for hex, bytearray and number handling.
  * @module
@@ -3065,7 +3081,7 @@ function getMessagePrehash(hash, msg, ctx = EMPTY) {
     return utils_concatBytes(new Uint8Array([1, ctx.length]), ctx, hash.oid, hashed);
 }
 //# sourceMappingURL=utils.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/post-quantum/_crystals.js
+;// CONCATENATED MODULE: ./node_modules/@noble/post-quantum/_crystals.js
 /**
  * Internal methods for lattice-based ML-KEM and ML-DSA.
  * @module
@@ -3267,7 +3283,7 @@ const _crystals_XOF128 = /* @__PURE__ */ createXofShake(shake128);
  */
 const _crystals_XOF256 = /* @__PURE__ */ createXofShake(shake256);
 //# sourceMappingURL=_crystals.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/post-quantum/ml-dsa.js
+;// CONCATENATED MODULE: ./node_modules/@noble/post-quantum/ml-dsa.js
 /**
  * ML-DSA: Module Lattice-based Digital Signature Algorithm from
  * [FIPS-204](https://csrc.nist.gov/pubs/fips/204/ipd). A.k.a. CRYSTALS-Dilithium.
@@ -3930,7 +3946,7 @@ const ml_dsa87 = /* @__PURE__ */ (/* unused pure expression or super */ null && 
     securityLevel: 256,
 }))()));
 //# sourceMappingURL=ml-dsa.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/_md.js
+;// CONCATENATED MODULE: ./node_modules/@noble/hashes/_md.js
 /**
  * Internal Merkle-Damgard hash utils.
  * @module
@@ -4133,7 +4149,7 @@ const SHA512_IV = /* @__PURE__ */ Uint32Array.from([
     0x510e527f, 0xade682d1, 0x9b05688c, 0x2b3e6c1f, 0x1f83d9ab, 0xfb41bd6b, 0x5be0cd19, 0x137e2179,
 ]);
 //# sourceMappingURL=_md.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/hashes/sha2.js
+;// CONCATENATED MODULE: ./node_modules/@noble/hashes/sha2.js
 /**
  * SHA2 hash function. A.k.a. sha256, sha384, sha512, sha512_224, sha512_256.
  * SHA256 is the fastest hash implementable in JS, even faster than Blake3.
@@ -4592,7 +4608,7 @@ const sha512_256 = /* @__PURE__ */ (/* unused pure expression or super */ null &
 const sha512_224 = /* @__PURE__ */ (/* unused pure expression or super */ null && (createHasher(() => new _SHA512_224(), 
 /* @__PURE__ */ oidNist(0x05))));
 //# sourceMappingURL=sha2.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/modular.js
+;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/modular.js
 /**
  * Utils for modular division and fields.
  * Field over 11 is a finite (Galois) field is integer number operations `mod 11`.
@@ -5443,7 +5459,7 @@ function mapHashToField(key, fieldOrder, isLE = false) {
     return isLE ? numberToBytesLE(reduced, fieldLen) : numberToBytesBE(reduced, fieldLen);
 }
 //# sourceMappingURL=modular.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/curve.js
+;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/curve.js
 /**
  * Methods for elliptic curve multiplication by scalars.
  * Contains wNAF, pippenger.
@@ -6055,7 +6071,7 @@ function createKeygen(randomSecretKey, getPublicKey) {
     };
 }
 //# sourceMappingURL=curve.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/edwards.js
+;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/edwards.js
 /**
  * Twisted Edwards curve. The formula is: ax² + y² = 1 + dx²y².
  * For design rationale of types / exports, see weierstrass module documentation.
@@ -6749,7 +6765,7 @@ function eddsa(Point, cHash, eddsaOpts = {}) {
     });
 }
 //# sourceMappingURL=edwards.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/abstract/hash-to-curve.js
+;// CONCATENATED MODULE: ./node_modules/@noble/curves/abstract/hash-to-curve.js
 
 
 // Octet Stream to Integer. "spec" implementation of os2ip is 2.5x slower vs bytesToNumberBE.
@@ -7096,7 +7112,7 @@ function hash_to_curve_createHasher(Point, mapToCurve, defaults) {
     });
 }
 //# sourceMappingURL=hash-to-curve.js.map
-;// CONCATENATED MODULE: ../../../Users/johneomo/repositorio-aux/pqc-receipt-verify-action-v2/node_modules/@noble/curves/ed25519.js
+;// CONCATENATED MODULE: ./node_modules/@noble/curves/ed25519.js
 /**
  * ed25519 Twisted Edwards curve with following addons:
  * - X25519 ECDH
@@ -7738,19 +7754,19 @@ const MAX_DEPTH = 32;
 const MAX_NODES = 100_000;
 
 function walk(v, depth, counter, signed) {
-  if (++counter.n > MAX_NODES) fail(C.JSON_TOO_LARGE, `jcs: more than ${MAX_NODES} nodes`);
-  if (depth > MAX_DEPTH) fail(C.JSON_TOO_DEEP, `jcs: nesting depth exceeds ${MAX_DEPTH}`);
+  if (++counter.n > MAX_NODES) codes_fail(codes_C.JSON_TOO_LARGE, `jcs: more than ${MAX_NODES} nodes`);
+  if (depth > MAX_DEPTH) codes_fail(codes_C.JSON_TOO_DEEP, `jcs: nesting depth exceeds ${MAX_DEPTH}`);
   if (typeof v === 'number') {
-    if (!Number.isFinite(v)) fail(C.INPUT_SHAPE, 'jcs: non-finite number');
-    if (signed && !Number.isSafeInteger(v)) fail(C.SIGNED_JSON_NUMBER, `signed JSON may only contain safe integers (got ${v})`);
+    if (!Number.isFinite(v)) codes_fail(codes_C.INPUT_SHAPE, 'jcs: non-finite number');
+    if (signed && !Number.isSafeInteger(v)) codes_fail(codes_C.SIGNED_JSON_NUMBER, `signed JSON may only contain safe integers (got ${v})`);
     return JSON.stringify(Object.is(v, -0) ? 0 : v);
   }
   if (v === null || typeof v === 'boolean') return JSON.stringify(v);
   if (typeof v === 'string') {
     for (let k = 0; k < v.length; k++) {
       const c = v.charCodeAt(k);
-      if (c >= 0xd800 && c <= 0xdbff) { const d = v.charCodeAt(k + 1); if (!(d >= 0xdc00 && d <= 0xdfff)) fail(C.JSON_LONE_SURROGATE, 'jcs: lone surrogate'); k++; }
-      else if (c >= 0xdc00 && c <= 0xdfff) fail(C.JSON_LONE_SURROGATE, 'jcs: lone surrogate');
+      if (c >= 0xd800 && c <= 0xdbff) { const d = v.charCodeAt(k + 1); if (!(d >= 0xdc00 && d <= 0xdfff)) codes_fail(codes_C.JSON_LONE_SURROGATE, 'jcs: lone surrogate'); k++; }
+      else if (c >= 0xdc00 && c <= 0xdfff) codes_fail(codes_C.JSON_LONE_SURROGATE, 'jcs: lone surrogate');
     }
     return JSON.stringify(v);
   }
@@ -7758,11 +7774,11 @@ function walk(v, depth, counter, signed) {
   if (typeof v === 'object') {
     return '{' + Object.keys(v).sort().map((k) => walk(k, depth + 1, counter, signed) + ':' + walk(v[k], depth + 1, counter, signed)).join(',') + '}';
   }
-  return fail(C.INPUT_SHAPE, `jcs: unsupported ${typeof v}`);
+  return codes_fail(codes_C.INPUT_SHAPE, `jcs: unsupported ${typeof v}`);
 }
 
 const jcs = (v) => walk(v, 0, { n: 0 }, false);
-const jcsSigned = (v) => walk(v, 0, { n: 0 }, true);
+const canon_jcsSigned = (v) => walk(v, 0, { n: 0 }, true);
 const utf8 = (s) => new TextEncoder().encode(s);
 
 ;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/crypto.mjs
@@ -7786,11 +7802,11 @@ const ML_DSA_65_SIG_BYTES = 3309;
 
 const toBytes = (d) => (typeof d === 'string' ? utf8(d) : d);
 const crypto_sha256 = (d) => sha256(toBytes(d));
-const sha256hex = (d) => bytesToHex(crypto_sha256(d));
+const crypto_sha256hex = (d) => bytesToHex(crypto_sha256(d));
 const keccak256hex = (bytes) => '0x' + bytesToHex(keccak_256(bytes));
 
 /** kid = sha256(canonical base64 text of the public key)[:16 hex] — binds a label to exactly one key. */
-const kidForKey = (publicKeyB64) => sha256hex(publicKeyB64).slice(0, 16);
+const kidForKey = (publicKeyB64) => crypto_sha256hex(publicKeyB64).slice(0, 16);
 
 /** ML-DSA-65 verify, pure FIPS 204 (empty context). Never throws: malformed inputs → false. */
 function mldsaVerify(sigBytes, message, pkBytes) {
@@ -7825,7 +7841,10 @@ const SELF_ATTEST_DOMAIN = 'FRACTALAI-x402-self-attest-v1';
 const MIDAS_CANON_HEADER = 'FRACTALAI-midas-alert-v1';
 const SEAL_SCHEMA = 'fractalai.x402-settlement-seal/0.1';
 
-const domains_USE = Object.freeze({ RECEIPT: 'x402-receipt', GOVERNANCE: 'key-directory-governance' });
+const STABLECOIN_DOMAIN = 'FRACTALAI-stablecoin-receipt-v1';
+const domains_COMMERCE_DOMAIN = 'FRACTALAI-agent-commerce-receipt-v1';
+
+const domains_USE = Object.freeze({ RECEIPT: 'x402-receipt', GOVERNANCE: 'key-directory-governance', STABLECOIN: 'stablecoin-receipt', COMMERCE: 'commerce-receipt' });
 
 /** route ids with a dedicated kind — they can never be presented as a generic served proof. */
 const RESERVED_ROUTES = Object.freeze({
@@ -7862,8 +7881,461 @@ const KINDS = Object.freeze({
     // A seller's own key: FractalAI's directory never authorizes it. Trust only via an explicit pinned key set.
     uses: [], trust: 'pinned-set-only', signed_time: 'body.sealed_at', anchorable: true,
   },
+  // spec §12: receipt for an on-chain Transfer of a pinned LatAm stablecoin. Own domain, own key use;
+  // the only kind with an `onchain` level (its signed facts are recomputed from the chain).
+  'latam-stablecoin-receipt': {
+    domain: STABLECOIN_DOMAIN,
+    message: (id) => `${STABLECOIN_DOMAIN}\n${id}`,
+    uses: [domains_USE.STABLECOIN], trust: 'directory', signed_time: 'transfer_canonical.issued_at', anchorable: true, onchain: true,
+  },
+  // spec §13: protocol-neutral receipt binding a payment reference, protocol artifacts (hashes) and the
+  // delivered content hash. Own domain, own key use; its payment facts are profile-defined (no onchain level).
+  'agent-commerce-receipt': {
+    domain: domains_COMMERCE_DOMAIN,
+    message: (id) => `${domains_COMMERCE_DOMAIN}\n${id}`,
+    uses: [domains_USE.COMMERCE], trust: 'directory', signed_time: 'commerce.issued_at', anchorable: true,
+  },
 });
 const KIND_NAMES = Object.freeze(Object.keys(KINDS));
+
+;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/rpc.mjs
+/**
+ * JSON-RPC over boundedFetch (hard deadline, byte cap, strict JSON). One call → one URL; the anchor
+ * verifiers run their whole check independently against every configured URL and require the resulting
+ * FACTS to agree (spec §7.4), so a single lying RPC cannot pass and a disagreement fails closed.
+ */
+
+
+
+let seq = 0;
+async function rpcCall(url, method, params, { fetchImpl, timeoutMs = 20_000, maxBytes = 4 * 1024 * 1024 } = {}) {
+  const id = ++seq;
+  const text = await boundedFetch(url, {
+    method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }), timeoutMs, maxBytes, fetchImpl,
+  });
+  let j;
+  try { j = parseJsonStrict(text, { MAX_JSON_BYTES: maxBytes }); } catch (e) { throw new codes_KernelError(codes_C.RPC_ERROR, `${method}: unparsable response (${e.code ?? 'JSON'})`); }
+  if (!isPlainObject(j)) throw new codes_KernelError(codes_C.RPC_ERROR, `${method}: response is not an object`);
+  if (j.error !== undefined && j.error !== null) throw new codes_KernelError(codes_C.RPC_ERROR, `${method}: ${oneLine(j.error?.message ?? JSON.stringify(j.error), 160)}`);
+  if (!Object.prototype.hasOwnProperty.call(j, 'result')) throw new codes_KernelError(codes_C.RPC_ERROR, `${method}: no result`);
+  return j.result;
+}
+
+/** Stable comparison of fact objects produced by different RPCs. */
+function sameFacts(a, b, fields) {
+  return fields.every((f) => JSON.stringify(a[f]) === JSON.stringify(b[f]));
+}
+
+;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/latam-stablecoins.json
+const latam_stablecoins_namespaceObject = /*#__PURE__*/JSON.parse('{"format":"fractalai.stablecoin-registry/1","id":"fractalai.latam-stablecoins/1","pinned_at":"2026-10-08T00:00:00Z","provenance":"Addresses from the 2026-10-07 census of Latin-American fiat stablecoins (issuer docs where available). Each entry re-verified on 2026-10-08 with eth_chainId + eth_call symbol()/name()/decimals() against TWO independent public RPCs per chain (Polygon: polygon-bor-rpc.publicnode.com + 1rpc.io/matic; Base: mainnet.base.org + base-rpc.publicnode.com; Arbitrum One: arb1.arbitrum.io/rpc + arbitrum-one-rpc.publicnode.com); both RPCs returned identical answers. Being on this list means \'this exact contract on this exact chain is the token FractalAI issues receipts for\' — it is NOT an endorsement of the issuer, its reserves or its regulatory status. Most tokens are upgradeable proxies: symbol()/decimals() are re-read on-chain at issuance and at verification and must still match.","chains":{"137":{"name":"Polygon PoS","default_rpc":"https://polygon-bor-rpc.publicnode.com"},"8453":{"name":"Base","default_rpc":"https://mainnet.base.org"},"42161":{"name":"Arbitrum One","default_rpc":"https://arb1.arbitrum.io/rpc"}},"tokens":[{"chain_id":137,"address":"0x12050c705152931cfee3dd56c52fb09dea816c23","symbol":"COPM","decimals":18,"name":"COP Minteo","currency":"COP","issuer":"Minteo (Colombia)","address_source":"issuer: transparency.minteo.com/contract-directory"},{"chain_id":137,"address":"0xe6a537a407488807f0bbeb0038b79004f19dddfb","symbol":"BRLA","decimals":18,"name":"BRLA Token","currency":"BRL","issuer":"AVENIA (CNPJ 50.224.164/0001-70)","address_source":"explorer/CoinGecko (issuer confirms the network, not the address)"},{"chain_id":8453,"address":"0xfcb34c47f850f452c15ea1b84d51231c38a61783","symbol":"BRLA","decimals":18,"name":"BRLA Token","currency":"BRL","issuer":"AVENIA (CNPJ 50.224.164/0001-70)","address_source":"explorer (basescan / Coinbase listing)"},{"chain_id":42161,"address":"0xf197ffc28c23e0309b5559e7a166f2c6164c80aa","symbol":"MXNB","decimals":6,"name":"MXNB","currency":"MXN","issuer":"Juno (Bitso)","address_source":"issuer: docs.bitso.com/juno/docs/mxnb-on-arbitrum"},{"chain_id":8453,"address":"0xf197ffc28c23e0309b5559e7a166f2c6164c80aa","symbol":"MXNB","decimals":6,"name":"MXNB","currency":"MXN","issuer":"Juno (Bitso)","address_source":"CoinGecko (same address as Arbitrum; issuer lists the network without the address)"},{"chain_id":8453,"address":"0x0dc4f92879b7670e5f4e4e6e3c801d229129d90d","symbol":"wARS","decimals":18,"name":"Peso Argentino","currency":"ARS","issuer":"Ripio affiliate (wFIAT)","address_source":"issuer: wFIAT whitepaper (Ethereum/Base/World Chain)"},{"chain_id":8453,"address":"0xd76f5faf6888e24d9f04bf92a0c8b921fe4390e0","symbol":"wBRL","decimals":18,"name":"Real Brasileño","currency":"BRL","issuer":"Ripio affiliate (wFIAT)","address_source":"issuer: wFIAT whitepaper (Ethereum/Base/World Chain)"}]}');
+;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/stablecoin.mjs
+/**
+ * Kind `latam-stablecoin-receipt` (spec/TRUST-KERNEL.md §12): a post-quantum receipt for an ERC-20
+ * Transfer of a PINNED Latin-American stablecoin that already happened on-chain.
+ *
+ *   signed message = "FRACTALAI-stablecoin-receipt-v1\n" + sha256hex(transfer_canonical)
+ *   key use        = "stablecoin-receipt"  (never "x402-receipt": a key for one product cannot sign the other)
+ *   signed time    = issued_at
+ *
+ * The canonical is a fixed, ordered list of `key=value` lines (no optional keys, no extras, lowercase hex,
+ * canonical decimals). Integrity also checks the token against the pinned registry
+ * (kernel/latam-stablecoins.json) and the decimal rendering of the amount.
+ *
+ * Level `onchain` (§12.4): every fact is recomputed from the chain — eth_chainId, the transaction receipt
+ * (status, block, the log at log_index: emitter, Transfer topic, from/to/amount), the canonical header at
+ * block_number (hash = signed block_hash, timestamp = signed block_timestamp), symbol()/decimals() of the
+ * token, the head and the `finalized` block — independently on every configured RPC, which must agree.
+ * `observeTransfer` is shared with the issuer (issuer/), so issuing and verifying make the same calls.
+ */
+
+
+
+
+
+
+
+
+const STABLECOIN_CANON_HEADER = 'FRACTALAI-stablecoin-transfer-v1';
+const STABLECOIN_USE = domains_USE.STABLECOIN;
+const REGISTRY_FORMAT = 'fractalai.stablecoin-registry/1';
+const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const SEL_SYMBOL = '0x95d89b41';
+const SEL_DECIMALS = '0x313ce567';
+const UINT256_MAX = (1n << 256n) - 1n;
+const ZERO_ADDR = '0x' + '0'.repeat(40);
+
+const DEC = /^(0|[1-9][0-9]{0,15})$/;
+const ADDR = /^0x[0-9a-f]{40}$/;
+const H32 = /^0x[0-9a-f]{64}$/;
+/** Field order is normative. Each value: [regex, description]. */
+const TRANSFER_FIELDS = Object.freeze([
+  ['registry', /^[a-z0-9][a-z0-9.-]{0,63}\/[1-9][0-9]{0,5}$/],
+  ['chain_id', DEC],
+  ['token', ADDR],
+  ['token_symbol', /^[A-Za-z0-9.-]{1,16}$/],
+  ['token_decimals', /^(0|[1-9][0-9]?)$/],
+  ['from', ADDR],
+  ['to', ADDR],
+  ['amount', /^[1-9][0-9]{0,77}$/],
+  ['amount_decimal', /^(0|[1-9][0-9]{0,77})(\.[0-9]{0,76}[1-9])?$/],
+  ['tx_hash', H32],
+  ['log_index', DEC],
+  ['block_number', DEC],
+  ['block_hash', H32],
+  ['block_timestamp', DEC],
+  ['confirmations', DEC],
+  ['finality', /^(finalized|confirmed)$/],
+  ['issued_at', DEC],
+  ['reference', /^[A-Za-z0-9._:/-]{0,64}$/],
+]);
+const FIELD_NAMES = TRANSFER_FIELDS.map(([k]) => k);
+const MAX_CANONICAL = 4096;
+
+const deepFreeze = (o) => { if (o && typeof o === 'object') { Object.values(o).forEach(deepFreeze); Object.freeze(o); } return o; };
+
+/** Structural check of a token registry (baked or caller-supplied). Returns a lookup. */
+function checkRegistry(reg) {
+  const bad = (d) => codes_fail(codes_C.REGISTRY_INVALID, d);
+  if (!isPlainObject(reg)) bad('registry is not an object');
+  if (reg.format !== REGISTRY_FORMAT) bad(`registry format is not ${REGISTRY_FORMAT}`);
+  if (typeof reg.id !== 'string' || !TRANSFER_FIELDS[0][1].test(reg.id)) bad('registry id malformed');
+  if (!Array.isArray(reg.tokens) || reg.tokens.length === 0 || reg.tokens.length > 1024) bad('registry tokens[] missing, empty or > 1024');
+  const chains = isPlainObject(reg.chains) ? reg.chains : {};
+  const byKey = new Map();
+  for (const t of reg.tokens) {
+    if (!isPlainObject(t)) bad('token entry is not an object');
+    if (!Number.isSafeInteger(t.chain_id) || t.chain_id <= 0) bad('token chain_id is not a positive integer');
+    if (typeof t.address !== 'string' || !ADDR.test(t.address)) bad('token address must be lowercase 0x + 40 hex');
+    if (typeof t.symbol !== 'string' || !TRANSFER_FIELDS[3][1].test(t.symbol)) bad(`token ${t.address} symbol malformed`);
+    if (!Number.isSafeInteger(t.decimals) || t.decimals < 0 || t.decimals > 77) bad(`token ${t.address} decimals out of range`);
+    const k = `${t.chain_id}:${t.address}`;
+    if (byKey.has(k)) bad(`token ${k} listed twice`);
+    byKey.set(k, t);
+  }
+  return { id: reg.id, chains, get: (chainId, address) => byKey.get(`${chainId}:${address}`) ?? null };
+}
+const BAKED_STABLECOIN_REGISTRY = deepFreeze(latam_stablecoins_namespaceObject);
+const BAKED_LOOKUP = checkRegistry(BAKED_STABLECOIN_REGISTRY);
+const registryLookup = (reg) => (reg === undefined || reg === BAKED_STABLECOIN_REGISTRY ? BAKED_LOOKUP : checkRegistry(reg));
+
+/** amount (integer string, smallest units) → canonical decimal string (no trailing zeros, no exponent). */
+function formatUnits(amount, decimals) {
+  const s = BigInt(amount).toString();
+  if (decimals === 0) return s;
+  const p = s.padStart(decimals + 1, '0');
+  const int = p.slice(0, p.length - decimals);
+  const frac = p.slice(p.length - decimals).replace(/0+$/, '');
+  return frac ? `${int}.${frac}` : int;
+}
+
+/** Build the canonical text from a field object (issuer side). Validates with the same rules as the parser. */
+function buildTransferCanonical(fields) {
+  const lines = [STABLECOIN_CANON_HEADER];
+  for (const k of FIELD_NAMES) {
+    if (!own(fields, k)) fail(C.CANONICAL_MALFORMED, `transfer lacks ${k}`);
+    lines.push(`${k}=${fields[k]}`);
+  }
+  for (const k of Object.keys(fields)) if (!FIELD_NAMES.includes(k)) fail(C.CANONICAL_MALFORMED, `unknown transfer field ${k}`);
+  const canonical = lines.join('\n');
+  parseTransferCanonical(canonical);
+  return canonical;
+}
+
+/** Strict parser of the signed canonical: exact header, exact key order, every value matches its pattern. */
+function parseTransferCanonical(canonical) {
+  if (typeof canonical !== 'string' || canonical.length === 0 || canonical.length > MAX_CANONICAL) codes_fail(codes_C.CANONICAL_MALFORMED, 'transfer_canonical missing or too long');
+  const lines = canonical.split('\n');
+  if (lines[0] !== STABLECOIN_CANON_HEADER) codes_fail(codes_C.CANONICAL_MALFORMED, `transfer_canonical header is not ${STABLECOIN_CANON_HEADER}`);
+  if (lines.length !== TRANSFER_FIELDS.length + 1) codes_fail(codes_C.CANONICAL_MALFORMED, `transfer_canonical must have exactly ${TRANSFER_FIELDS.length} fields in the normative order`);
+  const out = Object.create(null);
+  TRANSFER_FIELDS.forEach(([k, re], i) => {
+    const line = lines[i + 1];
+    const eq = line.indexOf('=');
+    if (eq < 0 || line.slice(0, eq) !== k) codes_fail(codes_C.CANONICAL_MALFORMED, `field ${i + 1} must be ${k}`);
+    const v = line.slice(eq + 1);
+    if (!re.test(v)) codes_fail(codes_C.CANONICAL_MALFORMED, `${k} value is malformed`);
+    out[k] = v;
+  });
+  for (const k of ['chain_id', 'log_index', 'block_number', 'block_timestamp', 'confirmations', 'issued_at']) if (!Number.isSafeInteger(Number(out[k]))) codes_fail(codes_C.CANONICAL_MALFORMED, `${k} out of range`);
+  if (BigInt(out.amount) > UINT256_MAX) codes_fail(codes_C.CANONICAL_MALFORMED, 'amount exceeds uint256');
+  if (Number(out.chain_id) <= 0) codes_fail(codes_C.CANONICAL_MALFORMED, 'chain_id must be positive');
+  if (Number(out.confirmations) < 1) codes_fail(codes_C.CANONICAL_MALFORMED, 'confirmations must be >= 1');
+  if (Number(out.issued_at) < Number(out.block_timestamp)) codes_fail(codes_C.CANONICAL_MALFORMED, 'issued_at is before the block that carries the transfer');
+  return out;
+}
+
+/** Semantic checks against the pinned registry (integrity level). */
+function checkTransferFacts(f, lookup) {
+  if (f.registry !== lookup.id) codes_fail(codes_C.TOKEN_NOT_PINNED, `receipt names registry ${f.registry}, the pinned registry is ${lookup.id}`);
+  const t = lookup.get(Number(f.chain_id), f.token);
+  if (!t) codes_fail(codes_C.TOKEN_NOT_PINNED, `token ${f.token} on chain ${f.chain_id} is not in the pinned registry ${lookup.id}`);
+  if (t.symbol !== f.token_symbol || String(t.decimals) !== f.token_decimals) codes_fail(codes_C.TOKEN_METADATA_MISMATCH, `signed ${f.token_symbol}/${f.token_decimals} != pinned ${t.symbol}/${t.decimals}`);
+  if (formatUnits(f.amount, t.decimals) !== f.amount_decimal) codes_fail(codes_C.AMOUNT_FORMAT_MISMATCH, `amount_decimal ${f.amount_decimal} != amount ${f.amount} at ${t.decimals} decimals`);
+  if (f.from === ZERO_ADDR || f.to === ZERO_ADDR) codes_fail(codes_C.PAYMENT_NOT_A_TRANSFER, 'mint/burn (zero address) is not a payment between two parties');
+  return t;
+}
+
+/** Kind parser (called by kinds.mjs#parseReceipt). */
+function parseStablecoinReceipt(r, { tokenRegistry } = {}) {
+  const known = new Set(['profile', 'algorithm', 'domain', 'transfer_canonical', 'transfer_id', 'signed_message', 'transfer', 'issued_at', 'public_key', 'signature']);
+  if (hygiene_own(r, 'algorithm') && r.algorithm !== 'ml-dsa-65') codes_fail(codes_C.ALGORITHM, `algorithm ${JSON.stringify(r.algorithm)} is not ml-dsa-65`);
+  const lookup = registryLookup(tokenRegistry);
+  const fields = parseTransferCanonical(r.transfer_canonical);
+  const id = crypto_sha256hex(r.transfer_canonical);
+  const message = `${STABLECOIN_DOMAIN}\n${id}`;
+  if (hygiene_own(r, 'domain') && r.domain !== STABLECOIN_DOMAIN) codes_fail(codes_C.DOMAIN_MISMATCH, `domain is not ${STABLECOIN_DOMAIN}`);
+  if (hygiene_own(r, 'transfer_id') && r.transfer_id !== id) codes_fail(codes_C.RECEIPT_ID_MISMATCH, 'transfer_id != sha256(transfer_canonical)');
+  if (hygiene_own(r, 'signed_message') && r.signed_message !== message) codes_fail(codes_C.SIGNED_MESSAGE_MISMATCH, 'signed_message != reconstructed signed message');
+  const signedTime = Number(fields.issued_at);
+  if (hygiene_own(r, 'issued_at') && r.issued_at !== signedTime) codes_fail(codes_C.UNSIGNED_FIELD_MISMATCH, `top-level issued_at ${JSON.stringify(r.issued_at)} != signed issued_at ${signedTime}`);
+  // The unsigned `transfer` copy: same keys, every value a STRING equal to the signed one. Numbers are
+  // refused on purpose: a uint256 amount compared as an IEEE-754 double would let 1e21 "equal" 10^21+1 (A8).
+  if (hygiene_own(r, 'transfer')) {
+    if (!isPlainObject(r.transfer)) codes_fail(codes_C.UNSIGNED_FIELD_MISMATCH, 'transfer is not an object');
+    const bad = [];
+    for (const k of Object.keys(r.transfer)) if (!hygiene_own(fields, k) || typeof r.transfer[k] !== 'string' || r.transfer[k] !== fields[k]) bad.push(k);
+    for (const k of FIELD_NAMES) if (!hygiene_own(r.transfer, k)) bad.push(k);
+    if (bad.length) codes_fail(codes_C.UNSIGNED_FIELD_MISMATCH, `transfer differs from the signed canonical: ${[...new Set(bad)].slice(0, 12).join(', ')}`);
+  }
+  checkTransferFacts(fields, lookup);
+  return {
+    kind: 'latam-stablecoin-receipt', content_id: id, message,
+    pk: b64decodeStrict(r.public_key, ML_DSA_65_PK_BYTES, 'public_key'), sig: b64decodeStrict(r.signature, ML_DSA_65_SIG_BYTES, 'signature'), public_key_b64: r.public_key,
+    signed_time: signedTime,
+    signed: { transfer_id: id, canonical_header: STABLECOIN_CANON_HEADER, ...fields },
+    ignored: Object.keys(r).filter((k) => !known.has(k) && k !== 'anchor' && k !== 'anchors'),
+  };
+}
+
+// ───────────────────────────── on-chain observation (shared by issuer and verifier) ─────────────────────────────
+const lc = (s) => String(s).toLowerCase();
+const malformed = (d) => new codes_KernelError(codes_C.PAYMENT_RPC_MALFORMED, d);
+function pqty(h, what) {
+  if (typeof h !== 'string' || !/^0x[0-9a-fA-F]{1,16}$/.test(h)) throw malformed(`${what} is not a hex quantity`);
+  const v = Number.parseInt(h.slice(2), 16);
+  if (!Number.isSafeInteger(v)) throw malformed(`${what} out of range`);
+  return v;
+}
+const isH32 = (s) => typeof s === 'string' && /^0x[0-9a-fA-F]{64}$/.test(s);
+
+/** Strict ABI decoding of `string` return data (offset 0x20, length, zero padding). */
+function abiDecodeString(hex) {
+  if (typeof hex !== 'string' || !/^0x([0-9a-fA-F]{64})+$/.test(hex)) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'symbol() did not return ABI words');
+  const d = hex.slice(2).toLowerCase();
+  if (BigInt('0x' + d.slice(0, 64)) !== 32n) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'symbol() is not an ABI dynamic string');
+  const len = BigInt('0x' + d.slice(64, 128));
+  if (len > 64n) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'symbol() string too long');
+  const n = Number(len), words = Math.ceil(n / 32);
+  if (d.length !== 128 + words * 64) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'symbol() return has trailing or missing words');
+  const body = d.slice(128, 128 + n * 2);
+  if (!/^0*$/.test(d.slice(128 + n * 2))) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'symbol() padding is not zero');
+  const bytes = Uint8Array.from(body.match(/../g) || [], (x) => parseInt(x, 16));
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch { return codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'symbol() is not UTF-8'); }
+}
+function abiDecodeUint8(hex) {
+  if (typeof hex !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(hex)) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'decimals() did not return one ABI word');
+  const v = BigInt(hex);
+  if (v > 255n) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, 'decimals() out of uint8 range');
+  return Number(v);
+}
+
+/**
+ * One RPC, one observation of the Transfer log at (tx_hash, log_index). Fixed call list (spec §12.4):
+ * eth_chainId · eth_getTransactionReceipt · eth_getBlockByNumber(n,false) · eth_call symbol() · eth_call decimals()
+ * · eth_blockNumber · eth_getBlockByNumber("finalized",false).
+ * @param {object} q  { chainId, txHash, logIndex, token?: expected emitter (verifier), lookup?: registry (issuer) }
+ */
+async function observeTransfer(url, q, { fetchImpl, timeoutMs } = {}) {
+  const call = (m, p) => rpcCall(url, m, p, { fetchImpl, timeoutMs });
+  const live = pqty(await call('eth_chainId', []), 'eth_chainId');
+  if (live !== q.chainId) codes_fail(codes_C.PAYMENT_WRONG_CHAIN, `RPC serves chain ${live}, the payment is on chain ${q.chainId}`);
+  const rc = await call('eth_getTransactionReceipt', [q.txHash]);
+  if (rc === null || rc === undefined) codes_fail(codes_C.PAYMENT_TX_NOT_FOUND, `transaction ${q.txHash} not found on chain ${q.chainId}`);
+  if (!isPlainObject(rc)) throw malformed('transaction receipt is not an object');
+  if (rc.status !== '0x1') {
+    if (rc.status === '0x0') codes_fail(codes_C.PAYMENT_TX_REVERTED, 'the transaction reverted (status 0x0): no transfer happened');
+    throw malformed('receipt status is neither 0x1 nor 0x0');
+  }
+  if (lc(rc.transactionHash) !== q.txHash) throw malformed('receipt transactionHash differs from the requested one');
+  if (!isH32(rc.blockHash)) throw malformed('receipt has no blockHash');
+  const blockNumber = pqty(rc.blockNumber, 'receipt.blockNumber');
+  const blockHash = lc(rc.blockHash);
+  const logs = Array.isArray(rc.logs) ? rc.logs : [];
+  const at = logs.filter((l) => isPlainObject(l) && pqty(l.logIndex, 'log.logIndex') === q.logIndex);
+  if (at.length === 0) codes_fail(codes_C.PAYMENT_LOG_NOT_FOUND, `transaction has no log with index ${q.logIndex}`);
+  if (at.length > 1) throw malformed(`several logs carry index ${q.logIndex}`);
+  const log = at[0];
+  if (log.removed === true) codes_fail(codes_C.PAYMENT_LOG_REMOVED, 'the log was removed by a reorg');
+  if (lc(log.blockHash) !== blockHash || pqty(log.blockNumber, 'log.blockNumber') !== blockNumber || lc(log.transactionHash) !== q.txHash) throw malformed('log block/tx fields disagree with the receipt');
+  if (typeof log.address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(log.address)) throw malformed('log address malformed');
+  const emitter = lc(log.address);
+  if (q.token !== undefined && emitter !== q.token) codes_fail(codes_C.PAYMENT_LOG_WRONG_CONTRACT, `log ${q.logIndex} was emitted by ${emitter}, not by the token ${q.token}`);
+  if (q.token === undefined && !q.lookup.get(q.chainId, emitter)) codes_fail(codes_C.TOKEN_NOT_PINNED, `log ${q.logIndex} was emitted by ${emitter}, which is not a pinned token on chain ${q.chainId}`);
+  const tp = log.topics;
+  if (!Array.isArray(tp) || tp.length !== 3 || lc(tp[0]) !== TRANSFER_TOPIC || !tp.slice(1).every((t) => typeof t === 'string' && /^0x0{24}[0-9a-fA-F]{40}$/.test(t))) codes_fail(codes_C.PAYMENT_LOG_NOT_TRANSFER, 'log is not an ERC-20 Transfer(address,address,uint256) event');
+  if (typeof log.data !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(log.data)) codes_fail(codes_C.PAYMENT_LOG_NOT_TRANSFER, 'Transfer data is not exactly one uint256');
+  const from = '0x' + lc(tp[1]).slice(26), to = '0x' + lc(tp[2]).slice(26), amount = BigInt(log.data).toString();
+
+  const blk = await call('eth_getBlockByNumber', [toQty(blockNumber), false]);
+  if (!isPlainObject(blk)) codes_fail(codes_C.PAYMENT_REORGED, `block ${blockNumber} not found`);
+  if (pqty(blk.number, 'block.number') !== blockNumber) throw malformed('header number mismatch');
+  if (lc(blk.hash) !== blockHash) codes_fail(codes_C.PAYMENT_REORGED, `the receipt's block ${blockHash} is not the canonical block ${lc(blk.hash)} at height ${blockNumber}`);
+  const time = pqty(blk.timestamp, 'block.timestamp');
+
+  const symbol = abiDecodeString(await call('eth_call', [{ to: emitter, data: SEL_SYMBOL }, 'latest']));
+  const decimals = abiDecodeUint8(await call('eth_call', [{ to: emitter, data: SEL_DECIMALS }, 'latest']));
+  const head = pqty(await call('eth_blockNumber', []), 'eth_blockNumber');
+  let finalized = false;
+  try {
+    const f = await call('eth_getBlockByNumber', ['finalized', false]);
+    finalized = isPlainObject(f) && pqty(f.number, 'finalized.number') >= blockNumber;
+  } catch { finalized = false; }
+  return {
+    chain_id: q.chainId, token: emitter, from, to, amount, tx_hash: q.txHash, log_index: q.logIndex,
+    block_number: blockNumber, block_hash: blockHash, block_timestamp: time, symbol, decimals,
+    head, confirmations: head - blockNumber + 1, finalized,
+  };
+}
+const AGREEMENT_FIELDS = ['chain_id', 'token', 'from', 'to', 'amount', 'tx_hash', 'log_index', 'block_number', 'block_hash', 'block_timestamp', 'symbol', 'decimals'];
+
+/** Run `observeTransfer` on every URL; all must succeed and agree (spec §7.4 applied to payments). */
+async function observeEverywhere(urls, q, policy, net) {
+  if (!urls || urls.length === 0) codes_fail(codes_C.PAYMENT_NO_RPC, `no RPC configured for chain ${q.chainId}`);
+  if (urls.length < policy.rpcQuorum) codes_fail(codes_C.RPC_QUORUM, `policy requires ${policy.rpcQuorum} independent RPCs, ${urls.length} configured`);
+  const results = [];
+  for (const url of urls) {
+    try { results.push(await observeTransfer(url, q, net)); }
+    catch (e) { if (e instanceof codes_KernelError) { e.detail = `${e.detail} [rpc ${results.length + 1}/${urls.length}]`; throw e; } throw new codes_KernelError(codes_C.RPC_ERROR, String(e?.message ?? e)); }
+  }
+  for (const r of results.slice(1)) if (!sameFacts(results[0], r, AGREEMENT_FIELDS)) codes_fail(codes_C.RPC_DISAGREEMENT, 'independent RPCs disagree on the transfer facts');
+  return { ...results[0], confirmations: Math.min(...results.map((r) => r.confirmations)), finalized: results.every((r) => r.finalized), rpc_count: results.length };
+}
+
+/**
+ * Verifier side (level `onchain`): recompute and compare with the SIGNED fields.
+ * @param {object} s     signed projection (strings, as in the canonical)
+ * @param {object} ctx   { rpcUrls, policy, fetchImpl, timeoutMs, lookup }
+ */
+async function verifyStablecoinPayment(s, ctx) {
+  const chainId = Number(s.chain_id);
+  const urls = ctx.rpcUrls?.length ? ctx.rpcUrls : (ctx.lookup.chains?.[s.chain_id]?.default_rpc ? [ctx.lookup.chains[s.chain_id].default_rpc] : []);
+  const o = await observeEverywhere(urls, { chainId, txHash: s.tx_hash, logIndex: Number(s.log_index), token: s.token }, ctx.policy, { fetchImpl: ctx.fetchImpl, timeoutMs: ctx.timeoutMs });
+  if (o.block_number !== Number(s.block_number)) codes_fail(codes_C.PAYMENT_BLOCK_MISMATCH, `the transaction is in block ${o.block_number}, the receipt says ${s.block_number}`);
+  if (o.block_hash !== s.block_hash) codes_fail(codes_C.PAYMENT_REORGED, `signed block_hash ${s.block_hash} is no longer the canonical block of this transaction (${o.block_hash})`);
+  if (o.block_timestamp !== Number(s.block_timestamp)) codes_fail(codes_C.PAYMENT_TIME_MISMATCH, `header timestamp ${o.block_timestamp} != signed block_timestamp ${s.block_timestamp}`);
+  if (o.from !== s.from || o.to !== s.to) codes_fail(codes_C.PAYMENT_PARTY_MISMATCH, `on-chain ${o.from} -> ${o.to} differs from the signed parties`);
+  if (o.amount !== s.amount) codes_fail(codes_C.PAYMENT_AMOUNT_MISMATCH, `on-chain amount ${o.amount} != signed amount ${s.amount}`);
+  if (o.symbol !== s.token_symbol || String(o.decimals) !== s.token_decimals) codes_fail(codes_C.PAYMENT_TOKEN_METADATA, `token now reports ${o.symbol}/${o.decimals}, signed ${s.token_symbol}/${s.token_decimals}`);
+  const need = Math.max(1, ctx.policy.minConfirmations);
+  if (o.confirmations < need) codes_fail(codes_C.PAYMENT_CONFIRMATIONS, `${o.confirmations} confirmations < policy ${need}`);
+  if (o.confirmations < Number(s.confirmations)) codes_fail(codes_C.PAYMENT_CONFIRMATIONS, `chain shows ${o.confirmations} confirmations, fewer than the ${s.confirmations} the signer claimed (RPC behind, or the claim is false)`);
+  if (s.finality === 'finalized' && !o.finalized) codes_fail(codes_C.PAYMENT_NOT_FINALIZED, 'the signer claimed finality but the chain does not report the block as finalized');
+  if (!o.finalized && !ctx.policy.allowUnfinalizedPayment) codes_fail(codes_C.PAYMENT_NOT_FINALIZED, 'the payment block is not finalized yet (policy.allowUnfinalizedPayment is false)');
+  return o;
+}
+
+;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/commerce.mjs
+/**
+ * Kind `agent-commerce-receipt` (spec/TRUST-KERNEL.md §13): a protocol-neutral post-quantum receipt that
+ * BINDS together, under one ML-DSA-65 signature and one signed time,
+ *   - identifiers of a payment produced by some payment protocol (AP2, ERC-8004 job, MCP tool call, PIX…),
+ *   - commitments (hashes) to that protocol's own artifacts (mandates, receipts, validation requests), and
+ *   - the sha256 of the content that was delivered for that payment.
+ *
+ *   signed message = "FRACTALAI-agent-commerce-receipt-v1\n" + sha256hex(JCS(commerce))
+ *   key use        = "commerce-receipt"   (an x402 or stablecoin key can never sign it, and vice versa)
+ *   signed time    = commerce.issued_at  (unix seconds, safe integer)
+ *
+ * The kernel checks the SHAPE of the body (closed key set, ASCII-only bounded values, safe integers) and the
+ * signature/trust of the issuer. It does NOT interpret `payment` or `bindings`: what each key means, and how a
+ * relying party re-derives it from the protocol artifacts, is defined by the `profile` (adapters, outside the
+ * kernel). A verdict therefore says "this issuer key bound these identifiers and this content hash at T",
+ * never "the payment settled" or "the content is correct".
+ */
+
+
+
+
+
+
+
+const COMMERCE_VERSION = 'fractalai.agent-commerce/1';
+const COMMERCE_MAX_BYTES = 8192;
+
+const PROTOCOL_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const PROFILE_RE = /^[a-z0-9][a-z0-9.-]{0,63}\/[1-9][0-9]{0,5}$/;
+const ENTRY_KEY_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const ENTRY_VALUE_RE = /^[\x20-\x7e]{1,512}$/;
+const MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
+const BODY_KEYS = ['bindings', 'delivery', 'issued_at', 'payment', 'profile', 'protocol', 'v'];
+const DELIVERY_KEYS = new Set(['sha256', 'media_type', 'size']);
+
+const bad = (detail) => codes_fail(codes_C.COMMERCE_MALFORMED, detail);
+
+function entries(obj, what, max) {
+  if (!isPlainObject(obj)) bad(`${what} is not an object`);
+  const keys = Object.keys(obj);
+  if (keys.length > max) bad(`${what} has more than ${max} entries`);
+  for (const k of keys) {
+    if (!ENTRY_KEY_RE.test(k)) bad(`${what} key ${JSON.stringify(k.slice(0, 40))} does not match ^[a-z][a-z0-9_]{0,63}$`);
+    const val = obj[k];
+    if (typeof val !== 'string' || !ENTRY_VALUE_RE.test(val)) bad(`${what}.${k} must be 1..512 printable ASCII characters`);
+  }
+}
+
+/** Strict shape of the signed body (spec §13.2). Returns the signed time. */
+function checkCommerceBody(b) {
+  if (!isPlainObject(b)) bad('commerce is not an object');
+  const keys = Object.keys(b).sort();
+  if (keys.length !== BODY_KEYS.length || keys.some((k, i) => k !== BODY_KEYS[i])) bad(`commerce must have exactly the keys ${BODY_KEYS.join(', ')}`);
+  if (b.v !== COMMERCE_VERSION) bad(`commerce.v is not ${COMMERCE_VERSION}`);
+  if (typeof b.protocol !== 'string' || !PROTOCOL_RE.test(b.protocol)) bad('commerce.protocol must match ^[a-z0-9][a-z0-9-]{0,31}$');
+  if (typeof b.profile !== 'string' || !PROFILE_RE.test(b.profile)) bad('commerce.profile must match <name>/<version>');
+  if (!Number.isSafeInteger(b.issued_at) || b.issued_at < 1) bad('commerce.issued_at must be a positive safe integer (unix seconds)');
+  entries(b.payment, 'payment', 16);
+  entries(b.bindings, 'bindings', 16);
+  const d = b.delivery;
+  if (!isPlainObject(d)) bad('delivery is not an object');
+  for (const k of Object.keys(d)) if (!DELIVERY_KEYS.has(k)) bad(`delivery has an unknown key ${JSON.stringify(k.slice(0, 40))}`);
+  if (!isHex(d.sha256, 64)) bad('delivery.sha256 must be 64 lowercase hex');
+  if (hygiene_own(d, 'media_type') && (typeof d.media_type !== 'string' || !MEDIA_TYPE_RE.test(d.media_type))) bad('delivery.media_type is not a lowercase type/subtype');
+  if (hygiene_own(d, 'size') && (!Number.isSafeInteger(d.size) || d.size < 0)) bad('delivery.size must be a non-negative safe integer');
+  return b.issued_at;
+}
+
+/** Parse a receipt document of kind agent-commerce-receipt (spec §13.3). */
+function parseCommerceReceipt(r) {
+  const known = new Set(['commerce', 'commerce_id', 'public_key', 'signature', 'algorithm', 'domain', 'signed_message', 'issued_at', 'profile']);
+  if (hygiene_own(r, 'algorithm') && r.algorithm !== 'ml-dsa-65') codes_fail(codes_C.ALGORITHM, `algorithm ${JSON.stringify(r.algorithm)} is not ml-dsa-65`);
+  if (!hygiene_own(r, 'commerce')) codes_fail(codes_C.INPUT_SHAPE, 'agent-commerce-receipt needs a commerce object');
+  const signedTime = checkCommerceBody(r.commerce);
+  const canonical = canon_jcsSigned(r.commerce);
+  if (new TextEncoder().encode(canonical).length > COMMERCE_MAX_BYTES) bad(`JCS(commerce) exceeds ${COMMERCE_MAX_BYTES} bytes`);
+  const id = crypto_sha256hex(canonical);
+  const message = `${domains_COMMERCE_DOMAIN}\n${id}`;
+  if (hygiene_own(r, 'commerce_id') && r.commerce_id !== id) codes_fail(codes_C.RECEIPT_ID_MISMATCH, 'commerce_id != sha256(JCS(commerce))');
+  if (hygiene_own(r, 'domain') && r.domain !== domains_COMMERCE_DOMAIN) codes_fail(codes_C.DOMAIN_MISMATCH, `domain is not ${domains_COMMERCE_DOMAIN}`);
+  if (hygiene_own(r, 'signed_message') && r.signed_message !== message) codes_fail(codes_C.SIGNED_MESSAGE_MISMATCH, 'signed_message != reconstructed signed message');
+  if (hygiene_own(r, 'issued_at') && r.issued_at !== signedTime) codes_fail(codes_C.UNSIGNED_FIELD_MISMATCH, `top-level issued_at ${JSON.stringify(r.issued_at)} != signed issued_at ${signedTime}`);
+  return {
+    kind: 'agent-commerce-receipt', content_id: id, message,
+    pk: b64decodeStrict(r.public_key, ML_DSA_65_PK_BYTES, 'public_key'),
+    sig: b64decodeStrict(r.signature, ML_DSA_65_SIG_BYTES, 'signature'),
+    public_key_b64: r.public_key, signed_time: signedTime,
+    signed: { commerce_id: id, ...r.commerce },
+    ignored: Object.keys(r).filter((k) => !known.has(k) && k !== 'anchor' && k !== 'anchors'),
+  };
+}
+
+/** Issuer helper (no key material here): the exact message an issuer must sign for a body. */
+function commerceSigningMessage(body) {
+  checkCommerceBody(body);
+  const canonical = jcsSigned(body);
+  if (new TextEncoder().encode(canonical).length > COMMERCE_MAX_BYTES) bad(`JCS(commerce) exceeds ${COMMERCE_MAX_BYTES} bytes`);
+  const id = sha256hex(canonical);
+  return { commerce_id: id, message: `${COMMERCE_DOMAIN}\n${id}` };
+}
 
 ;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/kinds.mjs
 /**
@@ -7880,7 +8352,9 @@ const KIND_NAMES = Object.freeze(Object.keys(KINDS));
 
 
 
-const MAX_CANONICAL = 8192;
+
+
+const kinds_MAX_CANONICAL = 8192;
 const MIDAS_REQUIRED = ['address', 'chain_id', 'health_factor', 'threshold', 'collateral_usd', 'debt_usd', 'risk_tier', 'observed_at', 'source', 'snapshot_hash', 'emitted_at'];
 const ALWAYS_IGNORED = new Set(['anchor', 'anchors']); // anchor references are hints, verified against consensus
 
@@ -7891,36 +8365,36 @@ const keyAndSig = (r, pkField = 'public_key', sigField = 'signature') => ({
   public_key_b64: r[pkField],
 });
 const checkAlgorithm = (r) => {
-  if (own(r, 'algorithm') && r.algorithm !== 'ml-dsa-65') fail(C.ALGORITHM, `algorithm ${JSON.stringify(r.algorithm)} is not ml-dsa-65`);
+  if (hygiene_own(r, 'algorithm') && r.algorithm !== 'ml-dsa-65') codes_fail(codes_C.ALGORITHM, `algorithm ${JSON.stringify(r.algorithm)} is not ml-dsa-65`);
 };
 /** RFC 3339 UTC timestamp as produced by Date#toISOString (ms optional) → unix seconds (floor). */
 function parseSealedAt(s) {
-  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s)) fail(C.SIGNED_TIME_MALFORMED, 'sealed_at is not an RFC 3339 UTC timestamp');
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(s)) codes_fail(codes_C.SIGNED_TIME_MALFORMED, 'sealed_at is not an RFC 3339 UTC timestamp');
   const ms = Date.parse(s);
-  if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) fail(C.SIGNED_TIME_MALFORMED, 'sealed_at is not a real calendar time');
+  if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== s.slice(0, 19)) codes_fail(codes_C.SIGNED_TIME_MALFORMED, 'sealed_at is not a real calendar time');
   return Math.floor(ms / 1000);
 }
 const decInt = (s, what) => {
-  if (typeof s !== 'string' || !/^(0|[1-9][0-9]{0,15})$/.test(s)) fail(C.CANONICAL_MALFORMED, `${what} is not a canonical decimal integer`);
+  if (typeof s !== 'string' || !/^(0|[1-9][0-9]{0,15})$/.test(s)) codes_fail(codes_C.CANONICAL_MALFORMED, `${what} is not a canonical decimal integer`);
   const v = Number(s);
-  if (!Number.isSafeInteger(v)) fail(C.CANONICAL_MALFORMED, `${what} out of range`);
+  if (!Number.isSafeInteger(v)) codes_fail(codes_C.CANONICAL_MALFORMED, `${what} out of range`);
   return v;
 };
 
 /** Parse the MIDAS signed canonical text. Strict: header, `key=value` lines, [a-z_] keys, no duplicates. */
 function parseMidasCanonical(canonical) {
-  if (typeof canonical !== 'string' || canonical.length === 0 || canonical.length > MAX_CANONICAL) fail(C.CANONICAL_MALFORMED, 'canonical missing or too long');
-  if (/[\r\u0000]/.test(canonical)) fail(C.CANONICAL_MALFORMED, 'canonical contains CR/NUL');
+  if (typeof canonical !== 'string' || canonical.length === 0 || canonical.length > kinds_MAX_CANONICAL) codes_fail(codes_C.CANONICAL_MALFORMED, 'canonical missing or too long');
+  if (/[\r\u0000]/.test(canonical)) codes_fail(codes_C.CANONICAL_MALFORMED, 'canonical contains CR/NUL');
   const [header, ...lines] = canonical.split('\n');
-  if (header !== MIDAS_CANON_HEADER) fail(C.CANONICAL_MALFORMED, `canonical header is not ${MIDAS_CANON_HEADER}`);
+  if (header !== MIDAS_CANON_HEADER) codes_fail(codes_C.CANONICAL_MALFORMED, `canonical header is not ${MIDAS_CANON_HEADER}`);
   const out = Object.create(null);
   for (const l of lines) {
     const m = /^([a-z][a-z0-9_]{0,63})=(.*)$/.exec(l);
-    if (!m) fail(C.CANONICAL_MALFORMED, `malformed canonical line ${JSON.stringify(l.slice(0, 40))}`);
-    if (own(out, m[1])) fail(C.CANONICAL_MALFORMED, `duplicate canonical key ${m[1]}`);
+    if (!m) codes_fail(codes_C.CANONICAL_MALFORMED, `malformed canonical line ${JSON.stringify(l.slice(0, 40))}`);
+    if (hygiene_own(out, m[1])) codes_fail(codes_C.CANONICAL_MALFORMED, `duplicate canonical key ${m[1]}`);
     out[m[1]] = m[2];
   }
-  for (const k of MIDAS_REQUIRED) if (!own(out, k)) fail(C.CANONICAL_MALFORMED, `canonical lacks ${k}`);
+  for (const k of MIDAS_REQUIRED) if (!hygiene_own(out, k)) codes_fail(codes_C.CANONICAL_MALFORMED, `canonical lacks ${k}`);
   return out;
 }
 
@@ -7937,28 +8411,28 @@ function midas(r) {
   const known = new Set(['canonical', 'signature', 'public_key', 'algorithm', 'receipt_id', 'served_message', 'served_domain', 'domain', 'facts', 'emitted_at', 'content_id', 'snapshot']);
   checkAlgorithm(r);
   const fields = parseMidasCanonical(r.canonical);
-  const id = sha256hex(r.canonical);
+  const id = crypto_sha256hex(r.canonical);
   const spec = KINDS['midas-alert'];
   const message = spec.message(id);
-  if (own(r, 'receipt_id') && r.receipt_id !== id) fail(C.RECEIPT_ID_MISMATCH, 'receipt_id != sha256(canonical)');
-  if (own(r, 'content_id') && r.content_id !== id) fail(C.RECEIPT_ID_MISMATCH, 'content_id != sha256(canonical)');
-  if (own(r, 'served_message') && r.served_message !== message) fail(C.SIGNED_MESSAGE_MISMATCH, 'served_message != reconstructed signed message');
-  if (own(r, 'served_domain') && r.served_domain !== spec.domain) fail(C.DOMAIN_MISMATCH, 'served_domain is not the midas-alert domain');
-  if (own(r, 'domain') && r.domain !== MIDAS_CANON_HEADER && r.domain !== spec.domain) fail(C.DOMAIN_MISMATCH, 'domain is neither the canonical header nor the signed domain');
+  if (hygiene_own(r, 'receipt_id') && r.receipt_id !== id) codes_fail(codes_C.RECEIPT_ID_MISMATCH, 'receipt_id != sha256(canonical)');
+  if (hygiene_own(r, 'content_id') && r.content_id !== id) codes_fail(codes_C.RECEIPT_ID_MISMATCH, 'content_id != sha256(canonical)');
+  if (hygiene_own(r, 'served_message') && r.served_message !== message) codes_fail(codes_C.SIGNED_MESSAGE_MISMATCH, 'served_message != reconstructed signed message');
+  if (hygiene_own(r, 'served_domain') && r.served_domain !== spec.domain) codes_fail(codes_C.DOMAIN_MISMATCH, 'served_domain is not the midas-alert domain');
+  if (hygiene_own(r, 'domain') && r.domain !== MIDAS_CANON_HEADER && r.domain !== spec.domain) codes_fail(codes_C.DOMAIN_MISMATCH, 'domain is neither the canonical header nor the signed domain');
   const signedTime = decInt(fields.emitted_at, 'emitted_at');
-  if (own(r, 'emitted_at') && r.emitted_at !== signedTime) fail(C.UNSIGNED_FIELD_MISMATCH, `top-level emitted_at ${JSON.stringify(r.emitted_at)} != signed emitted_at ${signedTime}`);
-  if (own(r, 'facts')) {
-    if (!isPlainObject(r.facts)) fail(C.UNSIGNED_FIELD_MISMATCH, 'facts is not an object');
+  if (hygiene_own(r, 'emitted_at') && r.emitted_at !== signedTime) codes_fail(codes_C.UNSIGNED_FIELD_MISMATCH, `top-level emitted_at ${JSON.stringify(r.emitted_at)} != signed emitted_at ${signedTime}`);
+  if (hygiene_own(r, 'facts')) {
+    if (!isPlainObject(r.facts)) codes_fail(codes_C.UNSIGNED_FIELD_MISMATCH, 'facts is not an object');
     const bad = [];
-    for (const k of Object.keys(r.facts)) if (!own(fields, k) || !factEquals(r.facts[k], fields[k])) bad.push(k);
-    for (const k of Object.keys(fields)) if (!own(r.facts, k)) bad.push(k);
-    if (bad.length) fail(C.UNSIGNED_FIELD_MISMATCH, `facts differ from the signed canonical: ${[...new Set(bad)].slice(0, 12).join(', ')}`);
+    for (const k of Object.keys(r.facts)) if (!hygiene_own(fields, k) || !factEquals(r.facts[k], fields[k])) bad.push(k);
+    for (const k of Object.keys(fields)) if (!hygiene_own(r.facts, k)) bad.push(k);
+    if (bad.length) codes_fail(codes_C.UNSIGNED_FIELD_MISMATCH, `facts differ from the signed canonical: ${[...new Set(bad)].slice(0, 12).join(', ')}`);
   }
   // `snapshot` is committed by the SIGNED snapshot_hash = sha256(JCS(snapshot)); it is either exactly that or rejected.
   let committedSnapshot;
-  if (own(r, 'snapshot')) {
-    if (!isHex(fields.snapshot_hash, 64)) fail(C.SNAPSHOT_MISMATCH, 'signed snapshot_hash is not 64 hex');
-    if (sha256hex(jcs(r.snapshot)) !== fields.snapshot_hash) fail(C.SNAPSHOT_MISMATCH, 'sha256(JCS(snapshot)) != signed snapshot_hash');
+  if (hygiene_own(r, 'snapshot')) {
+    if (!isHex(fields.snapshot_hash, 64)) codes_fail(codes_C.SNAPSHOT_MISMATCH, 'signed snapshot_hash is not 64 hex');
+    if (crypto_sha256hex(jcs(r.snapshot)) !== fields.snapshot_hash) codes_fail(codes_C.SNAPSHOT_MISMATCH, 'sha256(JCS(snapshot)) != signed snapshot_hash');
     committedSnapshot = r.snapshot;
   }
   const ks = keyAndSig(r);
@@ -7973,12 +8447,12 @@ function sealLike(r, kindName) {
   const known = new Set(['algorithm', 'domain', 'content_id', 'public_key', 'signature', 'body']);
   checkAlgorithm(r);
   const spec = KINDS[kindName];
-  if (r.domain !== spec.domain) fail(C.DOMAIN_MISMATCH, `seal domain is not the ${kindName} domain`);
-  if (!isPlainObject(r.body)) fail(C.INPUT_SHAPE, 'seal body missing or not an object');
-  if (r.body.schema !== SEAL_SCHEMA) fail(C.SCHEMA_MISMATCH, `body.schema is not ${SEAL_SCHEMA}`);
-  const cid = sha256hex(jcsSigned(r.body));
-  if (r.content_id !== cid) fail(C.CONTENT_ID_MISMATCH, 'content_id != sha256(JCS(body)) — body altered');
-  const signedTime = own(r.body, 'sealed_at') ? parseSealedAt(r.body.sealed_at) : fail(C.SIGNED_TIME_MALFORMED, 'body.sealed_at missing');
+  if (r.domain !== spec.domain) codes_fail(codes_C.DOMAIN_MISMATCH, `seal domain is not the ${kindName} domain`);
+  if (!isPlainObject(r.body)) codes_fail(codes_C.INPUT_SHAPE, 'seal body missing or not an object');
+  if (r.body.schema !== SEAL_SCHEMA) codes_fail(codes_C.SCHEMA_MISMATCH, `body.schema is not ${SEAL_SCHEMA}`);
+  const cid = crypto_sha256hex(canon_jcsSigned(r.body));
+  if (r.content_id !== cid) codes_fail(codes_C.CONTENT_ID_MISMATCH, 'content_id != sha256(JCS(body)) — body altered');
+  const signedTime = hygiene_own(r.body, 'sealed_at') ? parseSealedAt(r.body.sealed_at) : codes_fail(codes_C.SIGNED_TIME_MALFORMED, 'body.sealed_at missing');
   const ks = keyAndSig(r);
   return {
     kind: kindName, content_id: cid, message: spec.message(cid), ...ks, signed_time: signedTime,
@@ -7990,10 +8464,10 @@ function sealLike(r, kindName) {
 function acpVerdict(r) {
   const known = new Set(['decision', 'signed_message', 'signature', 'public_key', 'profile', 'algorithm']);
   checkAlgorithm(r);
-  if (!isPlainObject(r.decision)) fail(C.INPUT_SHAPE, 'acp-verdict needs a decision object');
-  const digest = sha256hex(jcsSigned(r.decision));
+  if (!isPlainObject(r.decision)) codes_fail(codes_C.INPUT_SHAPE, 'acp-verdict needs a decision object');
+  const digest = crypto_sha256hex(canon_jcsSigned(r.decision));
   const message = KINDS['acp-verdict'].message(digest);
-  if (own(r, 'signed_message') && r.signed_message !== message) fail(C.SIGNED_MESSAGE_MISMATCH, 'signed_message != served proof over sha256(JCS(decision))');
+  if (hygiene_own(r, 'signed_message') && r.signed_message !== message) codes_fail(codes_C.SIGNED_MESSAGE_MISMATCH, 'signed_message != served proof over sha256(JCS(decision))');
   const ks = keyAndSig(r);
   return { kind: 'acp-verdict', content_id: digest, message, ...ks, signed_time: null, signed: { digest, ...r.decision }, ignored: Object.keys(r).filter((k) => !known.has(k)) };
 }
@@ -8001,12 +8475,12 @@ function acpVerdict(r) {
 function servedProof(r) {
   const known = new Set(['domain', 'route_id', 'digest', 'signed_message', 'signature', 'public_key', 'profile', 'algorithm']);
   checkAlgorithm(r);
-  if (r.domain !== SERVED_PREFIX) fail(C.DOMAIN_MISMATCH, `served-proof domain is not ${SERVED_PREFIX}`);
-  if (typeof r.route_id !== 'string' || !ROUTE_RE.test(r.route_id)) fail(C.ROUTE_MALFORMED, 'route_id must match ^[a-z0-9][a-z0-9-]{0,63}$');
-  if (own(RESERVED_ROUTES, r.route_id)) fail(C.ROUTE_RESERVED, `route '${r.route_id}' is reserved for kind ${RESERVED_ROUTES[r.route_id]}`);
-  if (!isHex(r.digest, 64)) fail(C.DIGEST_MALFORMED, 'digest must be 64 lowercase hex');
+  if (r.domain !== SERVED_PREFIX) codes_fail(codes_C.DOMAIN_MISMATCH, `served-proof domain is not ${SERVED_PREFIX}`);
+  if (typeof r.route_id !== 'string' || !ROUTE_RE.test(r.route_id)) codes_fail(codes_C.ROUTE_MALFORMED, 'route_id must match ^[a-z0-9][a-z0-9-]{0,63}$');
+  if (hygiene_own(RESERVED_ROUTES, r.route_id)) codes_fail(codes_C.ROUTE_RESERVED, `route '${r.route_id}' is reserved for kind ${RESERVED_ROUTES[r.route_id]}`);
+  if (!isHex(r.digest, 64)) codes_fail(codes_C.DIGEST_MALFORMED, 'digest must be 64 lowercase hex');
   const message = KINDS['served-proof'].message(r.route_id, r.digest);
-  if (own(r, 'signed_message') && r.signed_message !== message) fail(C.SIGNED_MESSAGE_MISMATCH, 'signed_message != domain\\nroute\\ndigest');
+  if (hygiene_own(r, 'signed_message') && r.signed_message !== message) codes_fail(codes_C.SIGNED_MESSAGE_MISMATCH, 'signed_message != domain\\nroute\\ndigest');
   const ks = keyAndSig(r);
   return { kind: 'served-proof', content_id: r.digest, message, ...ks, signed_time: null, signed: { route_id: r.route_id, digest: r.digest }, ignored: Object.keys(r).filter((k) => !known.has(k)) };
 }
@@ -8018,16 +8492,18 @@ const MARKERS = {
   'x402-seal': ['body'], 'self-attest-seal': ['body'],
   'acp-verdict': ['decision'],
   'served-proof': ['route_id', 'digest'],
+  'latam-stablecoin-receipt': ['transfer_canonical', 'transfer_id', 'transfer'],
+  'agent-commerce-receipt': ['commerce', 'commerce_id'],
 };
 /** Optional `profile` labels used by the conformance vectors; if present they must name the parsed kind. */
 const PROFILE_ALIAS = { 'served-proof': 'x402-served', 'acp-verdict': 'acp-verdict' };
 
 function checkUnambiguous(r, kind) {
   const families = new Set();
-  for (const [k, fields] of Object.entries(MARKERS)) if (fields.some((f) => own(r, f))) families.add(k === 'self-attest-seal' ? 'x402-seal' : k);
+  for (const [k, fields] of Object.entries(MARKERS)) if (fields.some((f) => hygiene_own(r, f))) families.add(k === 'self-attest-seal' ? 'x402-seal' : k);
   const mine = kind === 'self-attest-seal' ? 'x402-seal' : kind;
-  for (const f of families) if (f !== mine) fail(C.KIND_AMBIGUOUS, `document carries ${f} fields while being verified as ${kind}`);
-  if (own(r, 'profile') && r.profile !== (PROFILE_ALIAS[kind] ?? kind)) fail(C.KIND_AMBIGUOUS, `profile ${JSON.stringify(r.profile).slice(0, 40)} does not name kind ${kind}`);
+  for (const f of families) if (f !== mine) codes_fail(codes_C.KIND_AMBIGUOUS, `document carries ${f} fields while being verified as ${kind}`);
+  if (hygiene_own(r, 'profile') && r.profile !== (PROFILE_ALIAS[kind] ?? kind)) codes_fail(codes_C.KIND_AMBIGUOUS, `profile ${JSON.stringify(r.profile).slice(0, 40)} does not name kind ${kind}`);
 }
 
 /**
@@ -8036,12 +8512,14 @@ function checkUnambiguous(r, kind) {
  * rebuilt from fixed domains (self-attest is never authorized by the directory).
  */
 function inferKind(r) {
-  if (!isPlainObject(r)) fail(C.INPUT_SHAPE, 'receipt is not a JSON object');
-  if (own(r, 'canonical')) return 'midas-alert';
-  if (own(r, 'body')) return r.domain === SELF_ATTEST_DOMAIN ? 'self-attest-seal' : 'x402-seal';
-  if (own(r, 'decision')) return 'acp-verdict';
-  if (own(r, 'route_id')) return 'served-proof';
-  return fail(C.KIND_UNKNOWN, 'cannot determine the receipt kind from its shape');
+  if (!isPlainObject(r)) codes_fail(codes_C.INPUT_SHAPE, 'receipt is not a JSON object');
+  if (hygiene_own(r, 'transfer_canonical')) return 'latam-stablecoin-receipt';
+  if (hygiene_own(r, 'commerce')) return 'agent-commerce-receipt';
+  if (hygiene_own(r, 'canonical')) return 'midas-alert';
+  if (hygiene_own(r, 'body')) return r.domain === SELF_ATTEST_DOMAIN ? 'self-attest-seal' : 'x402-seal';
+  if (hygiene_own(r, 'decision')) return 'acp-verdict';
+  if (hygiene_own(r, 'route_id')) return 'served-proof';
+  return codes_fail(codes_C.KIND_UNKNOWN, 'cannot determine the receipt kind from its shape');
 }
 
 const PARSERS = {
@@ -8050,23 +8528,26 @@ const PARSERS = {
   'self-attest-seal': (r) => sealLike(r, 'self-attest-seal'),
   'acp-verdict': acpVerdict,
   'served-proof': servedProof,
+  'latam-stablecoin-receipt': parseStablecoinReceipt,
+  'agent-commerce-receipt': parseCommerceReceipt,
 };
 
-function parseReceipt(r, declaredKind) {
-  if (!isPlainObject(r)) fail(C.INPUT_SHAPE, 'receipt is not a JSON object');
+/** @param {object} [ctx]  { tokenRegistry } — kind-specific pinned data (latam-stablecoin-receipt). */
+function parseReceipt(r, declaredKind, ctx = {}) {
+  if (!isPlainObject(r)) codes_fail(codes_C.INPUT_SHAPE, 'receipt is not a JSON object');
   const kind = declaredKind ?? inferKind(r);
   const p = PARSERS[kind];
-  if (!p) fail(C.KIND_UNKNOWN, `unknown kind ${JSON.stringify(kind)}`);
+  if (!p) codes_fail(codes_C.KIND_UNKNOWN, `unknown kind ${JSON.stringify(kind)}`);
   checkUnambiguous(r, kind);
-  return p(r);
+  return p(r, ctx);
 }
 
 /** On-chain ids of a parsed receipt (fractalai.pqc-receipt-anchor/1). */
 function anchorIds(parsed) {
   return {
-    receipt_id: sha256hex(parsed.sig),
-    payload_hash: sha256hex(parsed.message),
-    kid16: sha256hex(parsed.public_key_b64).slice(0, 16),
+    receipt_id: crypto_sha256hex(parsed.sig),
+    payload_hash: crypto_sha256hex(parsed.message),
+    kid16: crypto_sha256hex(parsed.public_key_b64).slice(0, 16),
   };
 }
 
@@ -8106,10 +8587,10 @@ const KEY_FIELDS_TYPED = ['not_before', 'not_after', 'revoked_at', 'added_at'];
 
 function directoryRoot(keys, prevRoot, epoch, governanceKeyB64) {
   const canonicalKeys = [...keys].sort((a, b) => (a.kid < b.kid ? -1 : a.kid > b.kid ? 1 : 0));
-  return sha256hex(jcs({ epoch, prev_root: prevRoot || ZERO_ROOT, governance_key: governanceKeyB64 || null, keys: canonicalKeys }));
+  return crypto_sha256hex(jcs({ epoch, prev_root: prevRoot || ZERO_ROOT, governance_key: governanceKeyB64 || null, keys: canonicalKeys }));
 }
 
-const directory_D = (detail) => new codes_KernelError(C.DIRECTORY_INVALID, detail);
+const directory_D = (detail) => new codes_KernelError(codes_C.DIRECTORY_INVALID, detail);
 
 /** Structural + cryptographic check of ONE epoch against ONE governance key. Throws KernelError. */
 function checkEpoch(dir, governanceKeyB64) {
@@ -8117,7 +8598,7 @@ function checkEpoch(dir, governanceKeyB64) {
   if (dir.spec !== KEY_DIR_DOMAIN) throw directory_D(`spec is not ${KEY_DIR_DOMAIN}`);
   if (!Number.isSafeInteger(dir.epoch) || dir.epoch < 1) throw directory_D('epoch is not a positive integer');
   if (!isHex(dir.root, 64)) throw directory_D('root is not 64 lowercase hex');
-  if (own(dir, 'prev_root') && dir.prev_root !== null && !isHex(dir.prev_root, 64)) throw directory_D('prev_root is not 64 lowercase hex');
+  if (hygiene_own(dir, 'prev_root') && dir.prev_root !== null && !isHex(dir.prev_root, 64)) throw directory_D('prev_root is not 64 lowercase hex');
   if (dir.epoch === 1 && (dir.prev_root ?? ZERO_ROOT) !== ZERO_ROOT) throw directory_D('epoch 1 must have a zero prev_root');
   if (!Array.isArray(dir.keys) || dir.keys.length === 0 || dir.keys.length > 256) throw directory_D('keys[] missing, empty or > 256');
   const asDir = (f) => { try { return f(); } catch (e) { throw directory_D(e instanceof codes_KernelError ? e.detail : String(e)); } };
@@ -8134,17 +8615,17 @@ function checkEpoch(dir, governanceKeyB64) {
     if (typeof k.use !== 'string') throw directory_D(`key ${k.kid} has no use`);
     if (!STATUSES.includes(k.status)) throw directory_D(`key ${k.kid} status ${JSON.stringify(k.status)} is not one of ${STATUSES.join('|')}`);
     for (const f of KEY_FIELDS_TYPED) {
-      if (own(k, f) && k[f] !== null && !(Number.isSafeInteger(k[f]) && k[f] >= 0)) throw directory_D(`key ${k.kid} ${f} must be a non-negative integer or null`);
+      if (hygiene_own(k, f) && k[f] !== null && !(Number.isSafeInteger(k[f]) && k[f] >= 0)) throw directory_D(`key ${k.kid} ${f} must be a non-negative integer or null`);
     }
   }
   if (pks.has(dir.directory_public_key)) throw directory_D('governance key is also listed as a receipt key (use separation violated)');
   const recomputed = directoryRoot(dir.keys, dir.prev_root, dir.epoch, dir.directory_public_key);
   if (recomputed !== dir.root) throw directory_D('root does not recompute over {epoch, prev_root, governance_key, keys}');
   const message = `${KEY_DIR_DOMAIN}\n${dir.root}`;
-  if (own(dir, 'signed_message') && dir.signed_message !== message) throw directory_D('signed_message != "FRACTALAI-key-directory-v1\\n" + root');
+  if (hygiene_own(dir, 'signed_message') && dir.signed_message !== message) throw directory_D('signed_message != "FRACTALAI-key-directory-v1\\n" + root');
   if (!mldsaVerify(sig, utf8(message), pk)) throw directory_D('governance ML-DSA-65 signature does not verify');
   if (governanceKeyB64 !== undefined && dir.directory_public_key !== governanceKeyB64) {
-    throw new codes_KernelError(C.DIRECTORY_SIGNER_NOT_PINNED, 'directory is signed by a key that is not the pinned governance key');
+    throw new codes_KernelError(codes_C.DIRECTORY_SIGNER_NOT_PINNED, 'directory is signed by a key that is not the pinned governance key');
   }
   return dir;
 }
@@ -8153,12 +8634,12 @@ function checkAppendOnly(prev, next) {
   const nextBy = new Map(next.keys.map((k) => [k.kid, k]));
   for (const a of prev.keys) {
     const b = nextBy.get(a.kid);
-    if (!b) fail(C.DIRECTORY_NOT_APPEND_ONLY, `epoch ${next.epoch} removed key ${a.kid}`);
-    if (b.public_key_b64 !== a.public_key_b64 || b.use !== a.use) fail(C.DIRECTORY_NOT_APPEND_ONLY, `epoch ${next.epoch} rebound key ${a.kid}`);
-    if (!ALLOWED_TRANSITIONS[a.status].includes(b.status)) fail(C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: status ${a.status} → ${b.status} not allowed`);
-    if (a.not_before != null && b.not_before !== a.not_before) fail(C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: not_before changed`);
-    if (a.revoked_at != null && b.revoked_at !== a.revoked_at) fail(C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: revoked_at changed`);
-    if (a.not_after != null && b.not_after != null && b.not_after > a.not_after) fail(C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: not_after extended`);
+    if (!b) codes_fail(codes_C.DIRECTORY_NOT_APPEND_ONLY, `epoch ${next.epoch} removed key ${a.kid}`);
+    if (b.public_key_b64 !== a.public_key_b64 || b.use !== a.use) codes_fail(codes_C.DIRECTORY_NOT_APPEND_ONLY, `epoch ${next.epoch} rebound key ${a.kid}`);
+    if (!ALLOWED_TRANSITIONS[a.status].includes(b.status)) codes_fail(codes_C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: status ${a.status} → ${b.status} not allowed`);
+    if (a.not_before != null && b.not_before !== a.not_before) codes_fail(codes_C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: not_before changed`);
+    if (a.revoked_at != null && b.revoked_at !== a.revoked_at) codes_fail(codes_C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: revoked_at changed`);
+    if (a.not_after != null && b.not_after != null && b.not_after > a.not_after) codes_fail(codes_C.DIRECTORY_NOT_APPEND_ONLY, `key ${a.kid}: not_after extended`);
   }
 }
 
@@ -8174,22 +8655,22 @@ function checkAppendOnly(prev, next) {
  */
 function verifyDirectoryChain(dir, ctx) {
   const gk = ctx.unpinnedSigner ? undefined : ctx.governanceKeyB64;
-  if (!ctx.unpinnedSigner && typeof gk !== 'string') fail(C.NO_TRUST_SOURCE, 'no pinned governance key');
+  if (!ctx.unpinnedSigner && typeof gk !== 'string') codes_fail(codes_C.NO_TRUST_SOURCE, 'no pinned governance key');
   checkEpoch(dir, gk);
   const signer = dir.directory_public_key;
   const cp = ctx.checkpoint;
   if (!cp) return { epoch: dir.epoch, root: dir.root, keys: dir.keys, chain_epochs: [dir.epoch], signer_pinned: !ctx.unpinnedSigner };
-  if (dir.epoch < cp.epoch) fail(C.DIRECTORY_ROLLBACK, `directory epoch ${dir.epoch} < pinned checkpoint epoch ${cp.epoch}`);
+  if (dir.epoch < cp.epoch) codes_fail(codes_C.DIRECTORY_ROLLBACK, `directory epoch ${dir.epoch} < pinned checkpoint epoch ${cp.epoch}`);
   if (dir.epoch === cp.epoch) {
-    if (dir.root !== cp.root) fail(C.DIRECTORY_EQUIVOCATION, `epoch ${dir.epoch} root ${dir.root.slice(0, 12)}… != pinned checkpoint root ${cp.root.slice(0, 12)}…`);
+    if (dir.root !== cp.root) codes_fail(codes_C.DIRECTORY_EQUIVOCATION, `epoch ${dir.epoch} root ${dir.root.slice(0, 12)}… != pinned checkpoint root ${cp.root.slice(0, 12)}…`);
     return { epoch: dir.epoch, root: dir.root, keys: dir.keys, chain_epochs: [dir.epoch], signer_pinned: !ctx.unpinnedSigner };
   }
   // epoch > checkpoint: rebuild the chain checkpoint → … → dir from supplied history.
   const byEpoch = new Map();
   for (const h of ctx.history || []) {
-    if (!isPlainObject(h) || !Number.isSafeInteger(h.epoch)) fail(C.DIRECTORY_INVALID, 'history entry is not a directory');
+    if (!isPlainObject(h) || !Number.isSafeInteger(h.epoch)) codes_fail(codes_C.DIRECTORY_INVALID, 'history entry is not a directory');
     if (h.epoch <= cp.epoch || h.epoch >= dir.epoch) continue;
-    if (byEpoch.has(h.epoch) && byEpoch.get(h.epoch).root !== h.root) fail(C.DIRECTORY_EQUIVOCATION, `two different roots supplied for epoch ${h.epoch}`);
+    if (byEpoch.has(h.epoch) && byEpoch.get(h.epoch).root !== h.root) codes_fail(codes_C.DIRECTORY_EQUIVOCATION, `two different roots supplied for epoch ${h.epoch}`);
     byEpoch.set(h.epoch, h);
   }
   let prevRoot = cp.root;
@@ -8198,16 +8679,16 @@ function verifyDirectoryChain(dir, ctx) {
   const cpBody = cp.directory ?? (ctx.history || []).find((h) => isPlainObject(h) && h.epoch === cp.epoch);
   if (cpBody) {
     checkEpoch(cpBody, gk);
-    if (cpBody.root !== cp.root) fail(C.DIRECTORY_EQUIVOCATION, `supplied checkpoint epoch ${cp.epoch} body does not match the pinned root`);
+    if (cpBody.root !== cp.root) codes_fail(codes_C.DIRECTORY_EQUIVOCATION, `supplied checkpoint epoch ${cp.epoch} body does not match the pinned root`);
     prevDir = cpBody;
   }
   const chain = [cp.epoch];
   for (let e = cp.epoch + 1; e <= dir.epoch; e++) {
     const cur = e === dir.epoch ? dir : byEpoch.get(e);
-    if (!cur) fail(C.DIRECTORY_CHAIN_GAP, `epoch ${e} missing between pinned checkpoint ${cp.epoch} and ${dir.epoch} — continuity unverifiable`);
+    if (!cur) codes_fail(codes_C.DIRECTORY_CHAIN_GAP, `epoch ${e} missing between pinned checkpoint ${cp.epoch} and ${dir.epoch} — continuity unverifiable`);
     if (cur !== dir) checkEpoch(cur, gk);
-    if (cur.directory_public_key !== signer) fail(C.DIRECTORY_SIGNER_NOT_PINNED, `epoch ${e} signed by a different governance key`);
-    if ((cur.prev_root ?? ZERO_ROOT) !== prevRoot) fail(C.DIRECTORY_CHAIN_BREAK, `epoch ${e} prev_root does not equal epoch ${e - 1} root`);
+    if (cur.directory_public_key !== signer) codes_fail(codes_C.DIRECTORY_SIGNER_NOT_PINNED, `epoch ${e} signed by a different governance key`);
+    if ((cur.prev_root ?? ZERO_ROOT) !== prevRoot) codes_fail(codes_C.DIRECTORY_CHAIN_BREAK, `epoch ${e} prev_root does not equal epoch ${e - 1} root`);
     if (prevDir) checkAppendOnly(prevDir, cur);
     prevRoot = cur.root; prevDir = cur; chain.push(e);
   }
@@ -8247,67 +8728,38 @@ function keyAuthorizes(key, { uses, signedTime, now, anchorTime, skew }) {
   const basis = signedTime === null ? 'verification-time' : 'signed';
   const T = signedTime === null ? now : signedTime;
   const R = (ok, code, detail, time_basis = basis) => ({ ok, code, detail, evaluated_at: T, time_basis });
-  if (!uses.includes(key.use)) return R(false, C.KEY_USE_MISMATCH, `key use '${key.use}' does not authorize this kind (allowed: ${uses.join(', ') || 'none'})`);
-  if (signedTime !== null && signedTime > now + skew) return R(false, C.SIGNED_TIME_IN_FUTURE, `signed time ${signedTime} is after verification time ${now} (+${skew}s)`);
+  if (!uses.includes(key.use)) return R(false, codes_C.KEY_USE_MISMATCH, `key use '${key.use}' does not authorize this kind (allowed: ${uses.join(', ') || 'none'})`);
+  if (signedTime !== null && signedTime > now + skew) return R(false, codes_C.SIGNED_TIME_IN_FUTURE, `signed time ${signedTime} is after verification time ${now} (+${skew}s)`);
   const nb = key.not_before ?? null, na = key.not_after ?? null;
   switch (key.status) {
     case 'reserved':
-      return R(false, C.KEY_STATUS_RESERVED, 'key is reserved (never activated)');
+      return R(false, codes_C.KEY_STATUS_RESERVED, 'key is reserved (never activated)');
     case 'active':
-      if (nb === null) return R(false, C.KEY_WINDOW_MALFORMED, 'active key without not_before');
-      if (T < nb) return R(false, C.KEY_NOT_YET_VALID, `T=${T} < not_before ${nb}`);
-      if (na !== null && T > na) return R(false, C.KEY_EXPIRED, `T=${T} > not_after ${na}`);
+      if (nb === null) return R(false, codes_C.KEY_WINDOW_MALFORMED, 'active key without not_before');
+      if (T < nb) return R(false, codes_C.KEY_NOT_YET_VALID, `T=${T} < not_before ${nb}`);
+      if (na !== null && T > na) return R(false, codes_C.KEY_EXPIRED, `T=${T} > not_after ${na}`);
       return R(true, undefined, 'active key inside its window');
     case 'retiring':
     case 'retired':
-      if (signedTime === null) return R(false, C.KEY_NEEDS_SIGNED_TIME, `a ${key.status} key only authorizes receipts that carry a signed time`);
-      if (nb === null || na === null) return R(false, C.KEY_WINDOW_MALFORMED, `${key.status} key without not_before/not_after`);
-      if (T < nb) return R(false, C.KEY_NOT_YET_VALID, `T=${T} < not_before ${nb}`);
-      if (T > na) return R(false, C.KEY_EXPIRED, `T=${T} > not_after ${na}`);
+      if (signedTime === null) return R(false, codes_C.KEY_NEEDS_SIGNED_TIME, `a ${key.status} key only authorizes receipts that carry a signed time`);
+      if (nb === null || na === null) return R(false, codes_C.KEY_WINDOW_MALFORMED, `${key.status} key without not_before/not_after`);
+      if (T < nb) return R(false, codes_C.KEY_NOT_YET_VALID, `T=${T} < not_before ${nb}`);
+      if (T > na) return R(false, codes_C.KEY_EXPIRED, `T=${T} > not_after ${na}`);
       return R(true, undefined, `${key.status} key, signed time inside its window`);
     case 'revoked': {
       const ra = key.revoked_at ?? null;
-      if (ra === null) return R(false, C.KEY_REVOKED, 'key revoked without revoked_at — nothing it signed can be trusted');
-      if (signedTime === null) return R(false, C.KEY_REVOKED, 'revoked key and the kind signs no time');
-      if (anchorTime === null) return R(false, C.KEY_REVOKED, `key revoked at ${ra}; signed time alone cannot prove pre-revocation existence — needs a consensus time anchor before ${ra}`);
-      if (anchorTime >= ra) return R(false, C.KEY_REVOKED, `earliest anchor ${anchorTime} is not before revocation ${ra}`);
-      if (nb === null || T < nb) return R(false, C.KEY_NOT_YET_VALID, `T=${T} < not_before ${nb}`);
-      if (na !== null && T > na) return R(false, C.KEY_EXPIRED, `T=${T} > not_after ${na}`);
-      if (T > anchorTime + skew) return R(false, C.ANCHOR_FORWARD_DATED, `signed time ${T} after anchor ${anchorTime}`);
+      if (ra === null) return R(false, codes_C.KEY_REVOKED, 'key revoked without revoked_at — nothing it signed can be trusted');
+      if (signedTime === null) return R(false, codes_C.KEY_REVOKED, 'revoked key and the kind signs no time');
+      if (anchorTime === null) return R(false, codes_C.KEY_REVOKED, `key revoked at ${ra}; signed time alone cannot prove pre-revocation existence — needs a consensus time anchor before ${ra}`);
+      if (anchorTime >= ra) return R(false, codes_C.KEY_REVOKED, `earliest anchor ${anchorTime} is not before revocation ${ra}`);
+      if (nb === null || T < nb) return R(false, codes_C.KEY_NOT_YET_VALID, `T=${T} < not_before ${nb}`);
+      if (na !== null && T > na) return R(false, codes_C.KEY_EXPIRED, `T=${T} > not_after ${na}`);
+      if (T > anchorTime + skew) return R(false, codes_C.ANCHOR_FORWARD_DATED, `signed time ${T} after anchor ${anchorTime}`);
       return { ok: true, detail: `revoked at ${ra}, but anchored at ${anchorTime} (before revocation)`, evaluated_at: anchorTime, time_basis: 'anchor' };
     }
     default:
-      return R(false, C.KEY_STATUS_UNKNOWN, `unknown status ${JSON.stringify(key.status)}`);
+      return R(false, codes_C.KEY_STATUS_UNKNOWN, `unknown status ${JSON.stringify(key.status)}`);
   }
-}
-
-;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/rpc.mjs
-/**
- * JSON-RPC over boundedFetch (hard deadline, byte cap, strict JSON). One call → one URL; the anchor
- * verifiers run their whole check independently against every configured URL and require the resulting
- * FACTS to agree (spec §7.4), so a single lying RPC cannot pass and a disagreement fails closed.
- */
-
-
-
-let seq = 0;
-async function rpcCall(url, method, params, { fetchImpl, timeoutMs = 20_000, maxBytes = 4 * 1024 * 1024 } = {}) {
-  const id = ++seq;
-  const text = await boundedFetch(url, {
-    method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }), timeoutMs, maxBytes, fetchImpl,
-  });
-  let j;
-  try { j = parseJsonStrict(text, { MAX_JSON_BYTES: maxBytes }); } catch (e) { throw new codes_KernelError(C.RPC_ERROR, `${method}: unparsable response (${e.code ?? 'JSON'})`); }
-  if (!isPlainObject(j)) throw new codes_KernelError(C.RPC_ERROR, `${method}: response is not an object`);
-  if (j.error !== undefined && j.error !== null) throw new codes_KernelError(C.RPC_ERROR, `${method}: ${oneLine(j.error?.message ?? JSON.stringify(j.error), 160)}`);
-  if (!Object.prototype.hasOwnProperty.call(j, 'result')) throw new codes_KernelError(C.RPC_ERROR, `${method}: no result`);
-  return j.result;
-}
-
-/** Stable comparison of fact objects produced by different RPCs. */
-function sameFacts(a, b, fields) {
-  return fields.every((f) => JSON.stringify(a[f]) === JSON.stringify(b[f]));
 }
 
 ;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/anchors/evm.mjs
@@ -8330,74 +8782,74 @@ function sameFacts(a, b, fields) {
 
 
 const RECEIPT_ANCHORED_TOPIC = '0x86069938b925599e2755e87e9b3242e8f6cbd24f2bc3d1ab52bc585d82646184';
-const lc = (s) => String(s).toLowerCase();
+const evm_lc = (s) => String(s).toLowerCase();
 
 async function onOneRpc(url, { chainId, dep, ids, signedTime, ref, policy, fetchImpl, timeoutMs }) {
   const call = (m, p) => rpcCall(url, m, p, { fetchImpl, timeoutMs });
   const live = qty(await call('eth_chainId', []), 'eth_chainId');
-  if (live !== chainId) fail(C.ANCHOR_WRONG_CHAIN, `RPC serves chain ${live}, not ${chainId}`);
+  if (live !== chainId) codes_fail(codes_C.ANCHOR_WRONG_CHAIN, `RPC serves chain ${live}, not ${chainId}`);
   const code = await call('eth_getCode', [dep.contract, 'latest']);
-  if (typeof code !== 'string' || !/^0x[0-9a-fA-F]+$/.test(code) || code.length <= 2) fail(C.ANCHOR_CODEHASH_MISMATCH, `no contract code at ${dep.contract}`);
+  if (typeof code !== 'string' || !/^0x[0-9a-fA-F]+$/.test(code) || code.length <= 2) codes_fail(codes_C.ANCHOR_CODEHASH_MISMATCH, `no contract code at ${dep.contract}`);
   const codehash = keccak256hex(hexToBytes(code));
-  if (codehash !== dep.runtime_codehash) fail(C.ANCHOR_CODEHASH_MISMATCH, `runtime code hash ${codehash} != pinned ${dep.runtime_codehash}`);
+  if (codehash !== dep.runtime_codehash) codes_fail(codes_C.ANCHOR_CODEHASH_MISMATCH, `runtime code hash ${codehash} != pinned ${dep.runtime_codehash}`);
 
   const rid = '0x' + ids.receipt_id;
-  const match = (l) => isPlainObject(l) && lc(l.address) === dep.contract && Array.isArray(l.topics) && lc(l.topics[0]) === RECEIPT_ANCHORED_TOPIC && lc(l.topics[1]) === rid;
+  const match = (l) => isPlainObject(l) && evm_lc(l.address) === dep.contract && Array.isArray(l.topics) && evm_lc(l.topics[0]) === RECEIPT_ANCHORED_TOPIC && evm_lc(l.topics[1]) === rid;
   let log;
   if (ref.tx_hash !== undefined) {
-    if (!isHex0x(ref.tx_hash, 64)) fail(C.ANCHOR_REF_MALFORMED, 'tx_hash is not 0x + 64 hex');
+    if (!isHex0x(ref.tx_hash, 64)) codes_fail(codes_C.ANCHOR_REF_MALFORMED, 'tx_hash is not 0x + 64 hex');
     const rc = await call('eth_getTransactionReceipt', [ref.tx_hash]);
-    if (!isPlainObject(rc)) fail(C.ANCHOR_NOT_FOUND, 'transaction receipt not found');
-    if (rc.status !== '0x1') fail(C.ANCHOR_TX_FAILED, 'anchor transaction did not succeed');
+    if (!isPlainObject(rc)) codes_fail(codes_C.ANCHOR_NOT_FOUND, 'transaction receipt not found');
+    if (rc.status !== '0x1') codes_fail(codes_C.ANCHOR_TX_FAILED, 'anchor transaction did not succeed');
     const cands = (Array.isArray(rc.logs) ? rc.logs : []).filter(match);
     const pick = ref.log_index !== undefined ? cands.filter((l) => qty(l.logIndex, 'logIndex') === ref.log_index) : cands;
-    if (pick.length === 0) fail(C.ANCHOR_NOT_FOUND, 'no ReceiptAnchored(receiptId) log from the pinned contract in that transaction');
-    if (pick.length > 1) fail(C.ANCHOR_AMBIGUOUS, 'more than one matching log');
+    if (pick.length === 0) codes_fail(codes_C.ANCHOR_NOT_FOUND, 'no ReceiptAnchored(receiptId) log from the pinned contract in that transaction');
+    if (pick.length > 1) codes_fail(codes_C.ANCHOR_AMBIGUOUS, 'more than one matching log');
     log = pick[0];
-    if (lc(log.transactionHash ?? ref.tx_hash) !== lc(ref.tx_hash)) fail(C.ANCHOR_LOG_MALFORMED, 'log transactionHash differs from the requested one');
+    if (evm_lc(log.transactionHash ?? ref.tx_hash) !== evm_lc(ref.tx_hash)) codes_fail(codes_C.ANCHOR_LOG_MALFORMED, 'log transactionHash differs from the requested one');
   } else {
     const from = ref.block_number !== undefined ? ref.block_number : dep.from_block;
     const to = ref.block_number !== undefined ? toQty(ref.block_number) : 'latest';
     const logs = await call('eth_getLogs', [{ address: dep.contract, topics: [RECEIPT_ANCHORED_TOPIC, rid], fromBlock: toQty(from), toBlock: to }]);
-    if (!Array.isArray(logs)) fail(C.RPC_ERROR, 'eth_getLogs did not return an array');
+    if (!Array.isArray(logs)) codes_fail(codes_C.RPC_ERROR, 'eth_getLogs did not return an array');
     const cands = logs.filter(match);
-    if (cands.length === 0) fail(C.ANCHOR_NOT_FOUND, 'no ReceiptAnchored(receiptId) event on the pinned contract');
-    if (cands.length > 1) fail(C.ANCHOR_AMBIGUOUS, 'several ReceiptAnchored events for one receiptId (write-once invariant broken)');
+    if (cands.length === 0) codes_fail(codes_C.ANCHOR_NOT_FOUND, 'no ReceiptAnchored(receiptId) event on the pinned contract');
+    if (cands.length > 1) codes_fail(codes_C.ANCHOR_AMBIGUOUS, 'several ReceiptAnchored events for one receiptId (write-once invariant broken)');
     log = cands[0];
   }
-  if (log.removed === true) fail(C.ANCHOR_LOG_REMOVED, 'log was removed by a reorg');
-  if (log.topics.length !== 4 || typeof log.data !== 'string' || !/^0x[0-9a-fA-F]{192}$/.test(log.data)) fail(C.ANCHOR_LOG_MALFORMED, 'event does not have 4 topics and 96 bytes of data');
-  if (!isHex0x(log.blockHash, 64)) fail(C.ANCHOR_LOG_MALFORMED, 'log has no blockHash');
+  if (log.removed === true) codes_fail(codes_C.ANCHOR_LOG_REMOVED, 'log was removed by a reorg');
+  if (log.topics.length !== 4 || typeof log.data !== 'string' || !/^0x[0-9a-fA-F]{192}$/.test(log.data)) codes_fail(codes_C.ANCHOR_LOG_MALFORMED, 'event does not have 4 topics and 96 bytes of data');
+  if (!isHex0x(log.blockHash, 64)) codes_fail(codes_C.ANCHOR_LOG_MALFORMED, 'log has no blockHash');
   const blockNumber = qty(log.blockNumber, 'log.blockNumber');
-  if (ref.block_number !== undefined && ref.block_number !== blockNumber) fail(C.ANCHOR_BLOCK_MISMATCH, `reference says block ${ref.block_number}, log is in ${blockNumber}`);
+  if (ref.block_number !== undefined && ref.block_number !== blockNumber) codes_fail(codes_C.ANCHOR_BLOCK_MISMATCH, `reference says block ${ref.block_number}, log is in ${blockNumber}`);
   const d = log.data.slice(2);
   const observedAt = Number.parseInt(d.slice(0, 64), 16);
-  if (!/^0{24}/.test(d.slice(64, 128)) || !/^0{48}/.test(d.slice(0, 64)) || !/^0{48}/.test(d.slice(128))) fail(C.ANCHOR_LOG_MALFORMED, 'event data has non-canonical padding');
+  if (!/^0{24}/.test(d.slice(64, 128)) || !/^0{48}/.test(d.slice(0, 64)) || !/^0{48}/.test(d.slice(128))) codes_fail(codes_C.ANCHOR_LOG_MALFORMED, 'event data has non-canonical padding');
   const anchoredBy = '0x' + d.slice(64 + 24, 128).toLowerCase();
   const eventAnchoredAt = Number.parseInt(d.slice(128, 192), 16);
-  if (lc(log.topics[2]) !== '0x' + ids.payload_hash) fail(C.ANCHOR_SQUATTED, `receiptId occupied by ${anchoredBy} with a different payloadHash (write-once slot squatted; anchor elsewhere)`);
-  if (lc(log.topics[3]) !== '0x' + ids.kid16 + '0'.repeat(48)) fail(C.ANCHOR_KID_MISMATCH, `receiptId anchored by ${anchoredBy} under another key id`);
+  if (evm_lc(log.topics[2]) !== '0x' + ids.payload_hash) codes_fail(codes_C.ANCHOR_SQUATTED, `receiptId occupied by ${anchoredBy} with a different payloadHash (write-once slot squatted; anchor elsewhere)`);
+  if (evm_lc(log.topics[3]) !== '0x' + ids.kid16 + '0'.repeat(48)) codes_fail(codes_C.ANCHOR_KID_MISMATCH, `receiptId anchored by ${anchoredBy} under another key id`);
 
   const blk = await call('eth_getBlockByNumber', [toQty(blockNumber), false]);
-  if (!isPlainObject(blk)) fail(C.ANCHOR_BLOCK_MISMATCH, `block ${blockNumber} not found`);
-  if (lc(blk.hash) !== lc(log.blockHash)) fail(C.ANCHOR_BLOCK_MISMATCH, `log blockHash is not the canonical hash of block ${blockNumber} (reorg or lying RPC)`);
-  if (qty(blk.number, 'block.number') !== blockNumber) fail(C.ANCHOR_BLOCK_MISMATCH, 'header number mismatch');
+  if (!isPlainObject(blk)) codes_fail(codes_C.ANCHOR_BLOCK_MISMATCH, `block ${blockNumber} not found`);
+  if (evm_lc(blk.hash) !== evm_lc(log.blockHash)) codes_fail(codes_C.ANCHOR_BLOCK_MISMATCH, `log blockHash is not the canonical hash of block ${blockNumber} (reorg or lying RPC)`);
+  if (qty(blk.number, 'block.number') !== blockNumber) codes_fail(codes_C.ANCHOR_BLOCK_MISMATCH, 'header number mismatch');
   const time = qty(blk.timestamp, 'block.timestamp');
-  if (eventAnchoredAt !== time) fail(C.ANCHOR_TIME_MISMATCH, `event anchoredAt ${eventAnchoredAt} != header timestamp ${time}`);
-  if (observedAt !== signedTime) fail(C.ANCHOR_OBSERVED_AT_MISMATCH, `on-chain observedAt ${observedAt} != signed time ${signedTime}`);
-  if (signedTime > time + policy.skew) fail(C.ANCHOR_FORWARD_DATED, `signed time ${signedTime} is after the anchor block time ${time}`);
+  if (eventAnchoredAt !== time) codes_fail(codes_C.ANCHOR_TIME_MISMATCH, `event anchoredAt ${eventAnchoredAt} != header timestamp ${time}`);
+  if (observedAt !== signedTime) codes_fail(codes_C.ANCHOR_OBSERVED_AT_MISMATCH, `on-chain observedAt ${observedAt} != signed time ${signedTime}`);
+  if (signedTime > time + policy.skew) codes_fail(codes_C.ANCHOR_FORWARD_DATED, `signed time ${signedTime} is after the anchor block time ${time}`);
 
   const head = qty(await call('eth_blockNumber', []), 'eth_blockNumber');
   const confirmations = head - blockNumber + 1;
-  if (confirmations < policy.minConfirmations) fail(C.ANCHOR_CONFIRMATIONS, `${confirmations} confirmations < ${policy.minConfirmations}`);
+  if (confirmations < policy.minConfirmations) codes_fail(codes_C.ANCHOR_CONFIRMATIONS, `${confirmations} confirmations < ${policy.minConfirmations}`);
   let finalized = false;
   try {
     const f = await call('eth_getBlockByNumber', ['finalized', false]);
     finalized = isPlainObject(f) && qty(f.number, 'finalized.number') >= blockNumber;
   } catch { finalized = false; }
   return {
-    chain: `eip155:${chainId}`, contract: dep.contract, tx_hash: lc(log.transactionHash ?? ref.tx_hash ?? ''), log_index: qty(log.logIndex, 'logIndex'),
-    block_number: blockNumber, block_hash: lc(log.blockHash), time, observed_at: observedAt, anchored_by: anchoredBy, finalized,
+    chain: `eip155:${chainId}`, contract: dep.contract, tx_hash: evm_lc(log.transactionHash ?? ref.tx_hash ?? ''), log_index: qty(log.logIndex, 'logIndex'),
+    block_number: blockNumber, block_hash: evm_lc(log.blockHash), time, observed_at: observedAt, anchored_by: anchoredBy, finalized,
   };
 }
 
@@ -8407,22 +8859,22 @@ async function onOneRpc(url, { chainId, dep, ids, signedTime, ref, policy, fetch
  */
 async function verifyEvmAnchor(ref, ctx) {
   const chainId = ref.chain_id;
-  if (!Number.isSafeInteger(chainId) || chainId <= 0) fail(C.ANCHOR_REF_MALFORMED, 'chain_id is not a positive integer');
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) codes_fail(codes_C.ANCHOR_REF_MALFORMED, 'chain_id is not a positive integer');
   const dep = ctx.roots.anchors?.evm?.[String(chainId)];
-  if (!dep) fail(C.ANCHOR_CHAIN_NOT_PINNED, `no pinned PQCReceiptAnchor deployment for chain ${chainId}`);
-  if (ref.contract !== undefined && lc(ref.contract) !== dep.contract) fail(C.ANCHOR_CONTRACT_NOT_PINNED, `reference names contract ${lc(ref.contract)}, pinned is ${dep.contract}`);
-  for (const f of ['block_number', 'log_index']) if (ref[f] !== undefined && !(Number.isSafeInteger(ref[f]) && ref[f] >= 0)) fail(C.ANCHOR_REF_MALFORMED, `${f} must be a non-negative integer`);
-  if (ctx.signedTime === null) fail(C.ANCHOR_REQUIRES_SIGNED_TIME, 'this kind signs no time; observedAt cannot be bound');
+  if (!dep) codes_fail(codes_C.ANCHOR_CHAIN_NOT_PINNED, `no pinned PQCReceiptAnchor deployment for chain ${chainId}`);
+  if (ref.contract !== undefined && evm_lc(ref.contract) !== dep.contract) codes_fail(codes_C.ANCHOR_CONTRACT_NOT_PINNED, `reference names contract ${evm_lc(ref.contract)}, pinned is ${dep.contract}`);
+  for (const f of ['block_number', 'log_index']) if (ref[f] !== undefined && !(Number.isSafeInteger(ref[f]) && ref[f] >= 0)) codes_fail(codes_C.ANCHOR_REF_MALFORMED, `${f} must be a non-negative integer`);
+  if (ctx.signedTime === null) codes_fail(codes_C.ANCHOR_REQUIRES_SIGNED_TIME, 'this kind signs no time; observedAt cannot be bound');
   const urls = ctx.rpcUrls?.length ? ctx.rpcUrls : (dep.default_rpc ? [dep.default_rpc] : []);
-  if (urls.length === 0) fail(C.ANCHOR_NO_RPC, `no RPC configured for chain ${chainId}`);
-  if (urls.length < ctx.policy.rpcQuorum) fail(C.RPC_QUORUM, `policy requires ${ctx.policy.rpcQuorum} independent RPCs, ${urls.length} configured`);
+  if (urls.length === 0) codes_fail(codes_C.ANCHOR_NO_RPC, `no RPC configured for chain ${chainId}`);
+  if (urls.length < ctx.policy.rpcQuorum) codes_fail(codes_C.RPC_QUORUM, `policy requires ${ctx.policy.rpcQuorum} independent RPCs, ${urls.length} configured`);
   const results = [];
   for (const url of urls) {
     try { results.push(await onOneRpc(url, { chainId, dep, ids: ctx.ids, signedTime: ctx.signedTime, ref, policy: ctx.policy, fetchImpl: ctx.fetchImpl, timeoutMs: ctx.timeoutMs })); }
-    catch (e) { if (e instanceof codes_KernelError) { e.detail = `${e.detail} [rpc ${results.length + 1}/${urls.length}]`; throw e; } throw new codes_KernelError(C.RPC_ERROR, String(e?.message ?? e)); }
+    catch (e) { if (e instanceof codes_KernelError) { e.detail = `${e.detail} [rpc ${results.length + 1}/${urls.length}]`; throw e; } throw new codes_KernelError(codes_C.RPC_ERROR, String(e?.message ?? e)); }
   }
   const fields = ['block_number', 'block_hash', 'time', 'observed_at', 'anchored_by', 'tx_hash', 'log_index'];
-  for (const r of results.slice(1)) if (!sameFacts(results[0], r, fields)) fail(C.RPC_DISAGREEMENT, 'independent RPCs disagree on the anchor facts');
+  for (const r of results.slice(1)) if (!sameFacts(results[0], r, fields)) codes_fail(codes_C.RPC_DISAGREEMENT, 'independent RPCs disagree on the anchor facts');
   const facts = { ...results[0], finalized: results.every((r) => r.finalized), rpc_count: results.length };
   facts.network_class = dep.network_class;
   facts.anchorer_known = (ctx.roots.known_anchorers?.evm || []).includes(facts.anchored_by);
@@ -8450,15 +8902,15 @@ function b58encode(bytes) {
   return s;
 }
 function b58decode(str, expectedLen) {
-  if (typeof str !== 'string' || str.length === 0 || str.length > 128 || !/^[1-9A-HJ-NP-Za-km-z]+$/.test(str)) fail(C.INPUT_SHAPE, 'invalid base58');
+  if (typeof str !== 'string' || str.length === 0 || str.length > 128 || !/^[1-9A-HJ-NP-Za-km-z]+$/.test(str)) codes_fail(codes_C.INPUT_SHAPE, 'invalid base58');
   let n = 0n;
   for (const c of str) n = n * 58n + BigInt(B58.indexOf(c));
   const out = [];
   while (n > 0n) { out.unshift(Number(n % 256n)); n /= 256n; }
   for (const c of str) { if (c !== '1') break; out.unshift(0); }
   const r = Uint8Array.from(out);
-  if (expectedLen !== undefined && r.length !== expectedLen) fail(C.INPUT_SHAPE, `base58 value is ${r.length} bytes, expected ${expectedLen}`);
-  if (b58encode(r) !== str) fail(C.INPUT_SHAPE, 'non-canonical base58');
+  if (expectedLen !== undefined && r.length !== expectedLen) codes_fail(codes_C.INPUT_SHAPE, `base58 value is ${r.length} bytes, expected ${expectedLen}`);
+  if (b58encode(r) !== str) codes_fail(codes_C.INPUT_SHAPE, 'non-canonical base58');
   return r;
 }
 
@@ -8476,7 +8928,7 @@ function shortvec(n) {
 function parseTransaction(wire) {
   const buf = Uint8Array.from(wire);
   let i = 0;
-  const bad = (m) => fail(C.SOL_TX_MALFORMED, m);
+  const bad = (m) => codes_fail(codes_C.SOL_TX_MALFORMED, m);
   const take = (n) => { if (n < 0 || i + n > buf.length) bad('truncated transaction'); const v = buf.slice(i, i + n); i += n; return v; };
   const byte = () => take(1)[0];
   const sv = () => {
@@ -8549,35 +9001,35 @@ function b64any(s) {
 async function solana_onOneRpc(url, { cluster, sig, sigBytes, signers, expectedMemo, signedTime, policy, fetchImpl, timeoutMs }) {
   const call = (m, p) => rpcCall(url, m, p, { fetchImpl, timeoutMs });
   const genesis = await call('getGenesisHash', []);
-  if (genesis !== cluster.genesis_hash) fail(C.SOL_GENESIS_MISMATCH, `RPC genesis ${String(genesis).slice(0, 44)} is not the pinned ${cluster.name} genesis`);
+  if (genesis !== cluster.genesis_hash) codes_fail(codes_C.SOL_GENESIS_MISMATCH, `RPC genesis ${String(genesis).slice(0, 44)} is not the pinned ${cluster.name} genesis`);
   const tx = await call('getTransaction', [sig, { encoding: 'base64', commitment: 'finalized', maxSupportedTransactionVersion: 0 }]);
-  if (!isPlainObject(tx)) fail(C.ANCHOR_NOT_FOUND, 'transaction not found at finalized commitment');
-  if (!isPlainObject(tx.meta) || tx.meta.err !== null) fail(C.ANCHOR_TX_FAILED, 'transaction failed or has no meta');
-  if (!Number.isSafeInteger(tx.slot) || tx.slot < 0) fail(C.SOL_TX_MALFORMED, 'slot missing');
-  if (!Number.isSafeInteger(tx.blockTime) || tx.blockTime <= 0) fail(C.SOL_NO_BLOCKTIME, 'finalized transaction has no blockTime — no time proof');
+  if (!isPlainObject(tx)) codes_fail(codes_C.ANCHOR_NOT_FOUND, 'transaction not found at finalized commitment');
+  if (!isPlainObject(tx.meta) || tx.meta.err !== null) codes_fail(codes_C.ANCHOR_TX_FAILED, 'transaction failed or has no meta');
+  if (!Number.isSafeInteger(tx.slot) || tx.slot < 0) codes_fail(codes_C.SOL_TX_MALFORMED, 'slot missing');
+  if (!Number.isSafeInteger(tx.blockTime) || tx.blockTime <= 0) codes_fail(codes_C.SOL_NO_BLOCKTIME, 'finalized transaction has no blockTime — no time proof');
   const st = await call('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
   const s0 = isPlainObject(st) && Array.isArray(st.value) ? st.value[0] : null;
-  if (!isPlainObject(s0) || s0.confirmationStatus !== 'finalized' || s0.err !== null) fail(C.SOL_NOT_FINALIZED, 'signature status is not finalized/ok');
-  if (s0.slot !== tx.slot) fail(C.SOL_STATUS_SLOT, `status slot ${s0.slot} != transaction slot ${tx.slot}`);
+  if (!isPlainObject(s0) || s0.confirmationStatus !== 'finalized' || s0.err !== null) codes_fail(codes_C.SOL_NOT_FINALIZED, 'signature status is not finalized/ok');
+  if (s0.slot !== tx.slot) codes_fail(codes_C.SOL_STATUS_SLOT, `status slot ${s0.slot} != transaction slot ${tx.slot}`);
   const t = Array.isArray(tx.transaction) ? tx.transaction : null;
-  if (!t || t.length !== 2 || t[1] !== 'base64' || typeof t[0] !== 'string') fail(C.SOL_TX_MALFORMED, 'transaction not returned as [base64, "base64"]');
+  if (!t || t.length !== 2 || t[1] !== 'base64' || typeof t[0] !== 'string') codes_fail(codes_C.SOL_TX_MALFORMED, 'transaction not returned as [base64, "base64"]');
   const wire = b64any(t[0]);
   const p = parseTransaction(wire);
-  if (p.signatures.length !== 1) fail(C.SOL_SIGNER_COUNT, `anchor tx must have exactly one signer, has ${p.signatures.length}`);
-  if (!p.signatures[0].every((b, k) => b === sigBytes[k])) fail(C.SOL_SIGNATURE_MISMATCH, 'RPC returned a transaction whose signature is not the requested one');
-  if (p.addressTableLookups) fail(C.SOL_LOOKUP_TABLES, 'address lookup tables are not accepted in an anchor tx');
+  if (p.signatures.length !== 1) codes_fail(codes_C.SOL_SIGNER_COUNT, `anchor tx must have exactly one signer, has ${p.signatures.length}`);
+  if (!p.signatures[0].every((b, k) => b === sigBytes[k])) codes_fail(codes_C.SOL_SIGNATURE_MISMATCH, 'RPC returned a transaction whose signature is not the requested one');
+  if (p.addressTableLookups) codes_fail(codes_C.SOL_LOOKUP_TABLES, 'address lookup tables are not accepted in an anchor tx');
   const signerBytes = p.accountKeys[0];
   const signer = b58encode(signerBytes);
-  if (!ed25519Verify(p.signatures[0], p.message, signerBytes)) fail(C.SOL_ED25519_INVALID, 'Ed25519 signature over the message does not verify');
-  if (!signers.includes(signer)) fail(C.SOL_SIGNER_NOT_ANNOUNCED, `signer ${signer} is not an announced anchor key for ${cluster.name}`);
-  if (p.instructions.length !== 1) fail(C.SOL_INSTRUCTION_COUNT, `anchor tx must carry exactly 1 instruction, has ${p.instructions.length}`);
+  if (!ed25519Verify(p.signatures[0], p.message, signerBytes)) codes_fail(codes_C.SOL_ED25519_INVALID, 'Ed25519 signature over the message does not verify');
+  if (!signers.includes(signer)) codes_fail(codes_C.SOL_SIGNER_NOT_ANNOUNCED, `signer ${signer} is not an announced anchor key for ${cluster.name}`);
+  if (p.instructions.length !== 1) codes_fail(codes_C.SOL_INSTRUCTION_COUNT, `anchor tx must carry exactly 1 instruction, has ${p.instructions.length}`);
   const ix = p.instructions[0];
-  if (b58encode(p.accountKeys[ix.programIdIndex]) !== MEMO_PROGRAM_ID) fail(C.SOL_NOT_MEMO, 'the instruction is not SPL Memo v2');
-  if (!ix.accounts.includes(0)) fail(C.SOL_MEMO_SIGNER, 'memo instruction does not list the signer');
+  if (b58encode(p.accountKeys[ix.programIdIndex]) !== MEMO_PROGRAM_ID) codes_fail(codes_C.SOL_NOT_MEMO, 'the instruction is not SPL Memo v2');
+  if (!ix.accounts.includes(0)) codes_fail(codes_C.SOL_MEMO_SIGNER, 'memo instruction does not list the signer');
   const expected = new TextEncoder().encode(expectedMemo);
-  if (ix.data.length !== expected.length || !ix.data.every((b, k) => b === expected[k])) fail(C.SOL_MEMO_MISMATCH, 'on-chain memo is not byte-identical to the memo rebuilt from the signed receipt');
-  if (signedTime > tx.blockTime + policy.skew) fail(C.ANCHOR_FORWARD_DATED, `signed time ${signedTime} after blockTime ${tx.blockTime}`);
-  return { slot: tx.slot, time: tx.blockTime, signer, wire_sha256: sha256hex(wire), finalized: true };
+  if (ix.data.length !== expected.length || !ix.data.every((b, k) => b === expected[k])) codes_fail(codes_C.SOL_MEMO_MISMATCH, 'on-chain memo is not byte-identical to the memo rebuilt from the signed receipt');
+  if (signedTime > tx.blockTime + policy.skew) codes_fail(codes_C.ANCHOR_FORWARD_DATED, `signed time ${signedTime} after blockTime ${tx.blockTime}`);
+  return { slot: tx.slot, time: tx.blockTime, signer, wire_sha256: crypto_sha256hex(wire), finalized: true };
 }
 
 /**
@@ -8587,22 +9039,22 @@ async function solana_onOneRpc(url, { cluster, sig, sigBytes, signers, expectedM
 async function verifySolanaAnchor(ref, ctx) {
   const clusters = ctx.roots.anchors?.solana?.clusters || {};
   const name = ref.cluster;
-  if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(clusters, name)) fail(C.ANCHOR_CHAIN_NOT_PINNED, `Solana cluster ${JSON.stringify(name)} is not pinned`);
+  if (typeof name !== 'string' || !Object.prototype.hasOwnProperty.call(clusters, name)) codes_fail(codes_C.ANCHOR_CHAIN_NOT_PINNED, `Solana cluster ${JSON.stringify(name)} is not pinned`);
   const cluster = { name, ...clusters[name] };
   const sigBytes = b58decode(ref.signature, 64);
   const signers = ctx.solanaSigners ?? (ctx.roots.anchors.solana.announced_signers?.[name] || []);
-  if (ref.signer !== undefined && !signers.includes(ref.signer)) fail(C.SOL_SIGNER_NOT_ANNOUNCED, `reference names signer ${String(ref.signer).slice(0, 44)}, not announced for ${name}`);
-  if (ctx.signedTime === null) fail(C.ANCHOR_REQUIRES_SIGNED_TIME, 'this kind signs no time; obs cannot be bound');
+  if (ref.signer !== undefined && !signers.includes(ref.signer)) codes_fail(codes_C.SOL_SIGNER_NOT_ANNOUNCED, `reference names signer ${String(ref.signer).slice(0, 44)}, not announced for ${name}`);
+  if (ctx.signedTime === null) codes_fail(codes_C.ANCHOR_REQUIRES_SIGNED_TIME, 'this kind signs no time; obs cannot be bound');
   const expectedMemo = buildMemo({ ...ctx.ids, observed_at: ctx.signedTime });
   const urls = ctx.rpcUrls?.length ? ctx.rpcUrls : (cluster.default_rpc ? [cluster.default_rpc] : []);
-  if (urls.length === 0) fail(C.ANCHOR_NO_RPC, `no RPC configured for Solana ${name}`);
-  if (urls.length < ctx.policy.rpcQuorum) fail(C.RPC_QUORUM, `policy requires ${ctx.policy.rpcQuorum} independent RPCs, ${urls.length} configured`);
+  if (urls.length === 0) codes_fail(codes_C.ANCHOR_NO_RPC, `no RPC configured for Solana ${name}`);
+  if (urls.length < ctx.policy.rpcQuorum) codes_fail(codes_C.RPC_QUORUM, `policy requires ${ctx.policy.rpcQuorum} independent RPCs, ${urls.length} configured`);
   const results = [];
   for (const url of urls) {
     try { results.push(await solana_onOneRpc(url, { cluster, sig: ref.signature, sigBytes, signers, expectedMemo, signedTime: ctx.signedTime, policy: ctx.policy, fetchImpl: ctx.fetchImpl, timeoutMs: ctx.timeoutMs })); }
-    catch (e) { if (e instanceof codes_KernelError) { e.detail = `${e.detail} [rpc ${results.length + 1}/${urls.length}]`; throw e; } throw new codes_KernelError(C.RPC_ERROR, String(e?.message ?? e)); }
+    catch (e) { if (e instanceof codes_KernelError) { e.detail = `${e.detail} [rpc ${results.length + 1}/${urls.length}]`; throw e; } throw new codes_KernelError(codes_C.RPC_ERROR, String(e?.message ?? e)); }
   }
-  for (const r of results.slice(1)) if (!sameFacts(results[0], r, ['slot', 'time', 'signer', 'wire_sha256'])) fail(C.RPC_DISAGREEMENT, 'independent RPCs disagree on the anchor transaction');
+  for (const r of results.slice(1)) if (!sameFacts(results[0], r, ['slot', 'time', 'signer', 'wire_sha256'])) codes_fail(codes_C.RPC_DISAGREEMENT, 'independent RPCs disagree on the anchor transaction');
   return {
     chain: `solana:${name}`, signature: ref.signature, slot: results[0].slot, time: results[0].time, signer: results[0].signer,
     memo: expectedMemo, finalized: true, rpc_count: results.length, network_class: cluster.network_class,
@@ -8684,12 +9136,12 @@ const checkpoint_directory_namespaceObject = /*#__PURE__*/JSON.parse('{"spec":"F
 
 
 
-const deepFreeze = (o) => { if (o && typeof o === 'object') { Object.values(o).forEach(deepFreeze); Object.freeze(o); } return o; };
-const BAKED_ROOTS = deepFreeze(trust_roots_namespaceObject);
+const roots_deepFreeze = (o) => { if (o && typeof o === 'object') { Object.values(o).forEach(roots_deepFreeze); Object.freeze(o); } return o; };
+const BAKED_ROOTS = roots_deepFreeze(trust_roots_namespaceObject);
 
 /** Full body of the pinned checkpoint epoch: lets the kernel check append-only (no key removed / rebound /
  * un-revoked) from the checkpoint to any later epoch. Accepted only if its root equals the pinned root. */
-const BAKED_CHECKPOINT_DIRECTORY = deepFreeze(checkpoint_directory_namespaceObject.root === trust_roots_namespaceObject.directory_checkpoint.root ? checkpoint_directory_namespaceObject : null);
+const BAKED_CHECKPOINT_DIRECTORY = roots_deepFreeze(checkpoint_directory_namespaceObject.root === trust_roots_namespaceObject.directory_checkpoint.root ? checkpoint_directory_namespaceObject : null);
 
 ;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/verify.mjs
 /**
@@ -8711,20 +9163,21 @@ const BAKED_CHECKPOINT_DIRECTORY = deepFreeze(checkpoint_directory_namespaceObje
 
 
 
+
 const nowSec = () => Math.floor(Date.now() / 1000);
 /** Defensive deep copy through the kernel's own strict parser (no shared references, no prototypes). */
 const freeze = (v) => parseJsonStrict(JSON.stringify(v));
 
 function toValue(x, what, allowObject) {
   if (typeof x === 'string' || x instanceof Uint8Array) return parseJsonStrict(x);
-  if (!allowObject) throw new codes_KernelError(C.ENGINE_UNSAFE_OBJECT_INPUT, `${what}: this engine failed the native JSON key-cache self-test; pass raw JSON text (or set allowObjectInput, reflected as an override)`);
+  if (!allowObject) throw new codes_KernelError(codes_C.ENGINE_UNSAFE_OBJECT_INPUT, `${what}: this engine failed the native JSON key-cache self-test; pass raw JSON text (or set allowObjectInput, reflected as an override)`);
   assertJsonValue(x);
   return freeze(x);
 }
 
 function normalizePolicy(p = {}) {
   const require = Array.isArray(p.require) ? [...p.require] : [...DEFAULT_REQUIRE];
-  for (const l of require) if (!LEVELS.includes(l)) throw new codes_KernelError(C.INPUT_SHAPE, `unknown level ${l} in policy.require`);
+  for (const l of require) if (!LEVELS.includes(l)) throw new codes_KernelError(codes_C.INPUT_SHAPE, `unknown level ${l} in policy.require`);
   if (!require.includes('integrity')) require.unshift('integrity');
   return {
     require,
@@ -8733,6 +9186,7 @@ function normalizePolicy(p = {}) {
     minConfirmations: Number.isSafeInteger(p.minConfirmations) && p.minConfirmations >= 0 ? p.minConfirmations : 1,
     rpcQuorum: Number.isSafeInteger(p.rpcQuorum) && p.rpcQuorum >= 1 ? p.rpcQuorum : 1,
     skew: Number.isSafeInteger(p.maxClockSkewSec) && p.maxClockSkewSec >= 0 ? p.maxClockSkewSec : 900,
+    allowUnfinalizedPayment: p.allowUnfinalizedPayment === true,
   };
 }
 
@@ -8746,19 +9200,21 @@ function normalizePolicy(p = {}) {
  *   governanceKey, roots, allowTlsDirectory   OVERRIDES of the baked trust roots
  *   anchors             anchor references (default: receipt.anchors | receipt.anchor); checkAnchors: evaluate them
  *   rpc                 { 'eip155:42161': [urls], 'solana:devnet': [urls] }; solanaSigners (override)
- *   policy              { require, allowTestnetAnchors, requireKnownAnchorer, minConfirmations, rpcQuorum, maxClockSkewSec }
+ *   checkOnchain        evaluate level `onchain` (kinds with on-chain facts: latam-stablecoin-receipt)
+ *   tokenRegistry       OVERRIDE of the pinned stablecoin registry (kernel/latam-stablecoins.json)
+ *   policy              { require, allowTestnetAnchors, requireKnownAnchorer, minConfirmations, rpcQuorum, maxClockSkewSec, allowUnfinalizedPayment }
  *   now, fetchImpl, timeoutMs, allowObjectInput
  */
 function* core(input, opts) {
   const v = {
     kernel: KERNEL_ID, spec_version: SPEC_VERSION, kind: null, valid: false,
-    levels: { integrity: false, authentic: false, trusted: false, time_anchored: null, finalized: null },
+    levels: { integrity: false, authentic: false, trusted: false, time_anchored: null, finalized: null, onchain: null },
     trust_basis: 'none', policy: null, key: null, directory: null, signed: null, signed_time: null,
-    anchors: [], overrides: [], ignored_unsigned_fields: [], reasons: [], exit_code: EXIT.integrity,
+    anchors: [], onchain: null, overrides: [], ignored_unsigned_fields: [], reasons: [], exit_code: EXIT.integrity,
     engine: { self_test_ok: SELF_TEST.ok, native_json_key_cache_ok: SELF_TEST.native_json_key_cache_ok },
   };
   const reason = (level, e) => {
-    const code = e instanceof codes_KernelError ? e.code : C.INTERNAL;
+    const code = e instanceof codes_KernelError ? e.code : codes_C.INTERNAL;
     const detail = e instanceof codes_KernelError ? e.detail : String(e?.message ?? e);
     v.reasons.push({ level, code, detail });
   };
@@ -8769,7 +9225,7 @@ function* core(input, opts) {
     return v;
   };
   try {
-    if (!SELF_TEST.ok) { reason('integrity', new codes_KernelError(C.ENGINE_SELFTEST_FAILED, `kernel self-test failed: ${JSON.stringify(SELF_TEST)}`)); return finish(); }
+    if (!SELF_TEST.ok) { reason('integrity', new codes_KernelError(codes_C.ENGINE_SELFTEST_FAILED, `kernel self-test failed: ${JSON.stringify(SELF_TEST)}`)); return finish(); }
     const policy = normalizePolicy(opts.policy);
     v.policy = policy;
     const now = Number.isSafeInteger(opts.now) ? opts.now : nowSec();
@@ -8777,18 +9233,19 @@ function* core(input, opts) {
     if (opts.allowObjectInput === true && !SELF_TEST.native_json_key_cache_ok) v.overrides.push('allowObjectInput (engine JSON key-cache self-test failed)');
 
     // ── 1. integrity ────────────────────────────────────────────────────────────────────────────
-    let receipt, parsed;
+    let receipt, parsed, tokenRegistry;
     try {
+      if (opts.tokenRegistry !== undefined) { tokenRegistry = toValue(opts.tokenRegistry, 'tokenRegistry', true); v.overrides.push('tokenRegistry'); }
       receipt = toValue(input, 'receipt', allowObject);
-      if (!isPlainObject(receipt)) throw new codes_KernelError(C.INPUT_SHAPE, 'receipt is not a JSON object');
+      if (!isPlainObject(receipt)) throw new codes_KernelError(codes_C.INPUT_SHAPE, 'receipt is not a JSON object');
       const allowed = opts.kind !== undefined ? [opts.kind] : Array.isArray(opts.kinds) ? opts.kinds : null;
-      if (!allowed || allowed.length === 0) throw new codes_KernelError(C.KIND_UNKNOWN, 'policy must name the expected kind(s) (opts.kind / opts.kinds) — the document never chooses');
-      for (const k of allowed) if (!KIND_NAMES.includes(k)) throw new codes_KernelError(C.KIND_UNKNOWN, `unknown kind ${JSON.stringify(k)}`);
+      if (!allowed || allowed.length === 0) throw new codes_KernelError(codes_C.KIND_UNKNOWN, 'policy must name the expected kind(s) (opts.kind / opts.kinds) — the document never chooses');
+      for (const k of allowed) if (!KIND_NAMES.includes(k)) throw new codes_KernelError(codes_C.KIND_UNKNOWN, `unknown kind ${JSON.stringify(k)}`);
       const kind = allowed.length === 1 ? allowed[0] : inferKind(receipt);
-      if (!allowed.includes(kind)) throw new codes_KernelError(C.KIND_NOT_ALLOWED, `receipt looks like ${kind}, policy allows ${allowed.join(', ')}`);
+      if (!allowed.includes(kind)) throw new codes_KernelError(codes_C.KIND_NOT_ALLOWED, `receipt looks like ${kind}, policy allows ${allowed.join(', ')}`);
       v.kind = kind;
-      parsed = parseReceipt(receipt, kind);
-      if (opts.expectedId !== undefined && opts.expectedId !== parsed.content_id) throw new codes_KernelError(C.EXPECTED_ID_MISMATCH, 'the receipt is not the one that was requested (content id differs)');
+      parsed = parseReceipt(receipt, kind, { tokenRegistry });
+      if (opts.expectedId !== undefined && opts.expectedId !== parsed.content_id) throw new codes_KernelError(codes_C.EXPECTED_ID_MISMATCH, 'the receipt is not the one that was requested (content id differs)');
       v.levels.integrity = true;
       v.ignored_unsigned_fields = parsed.ignored;
       v.signed_time = parsed.signed_time;
@@ -8796,12 +9253,24 @@ function* core(input, opts) {
 
     // ── 2. authentic ────────────────────────────────────────────────────────────────────────────
     if (!mldsaVerify(parsed.sig, new TextEncoder().encode(parsed.message), parsed.pk)) {
-      reason('authentic', new codes_KernelError(C.SIGNATURE_INVALID, `ML-DSA-65 signature does not verify over the reconstructed ${parsed.kind} message`));
+      reason('authentic', new codes_KernelError(codes_C.SIGNATURE_INVALID, `ML-DSA-65 signature does not verify over the reconstructed ${parsed.kind} message`));
       return finish();
     }
     v.levels.authentic = true;
     v.signed = parsed.signed;
     v.key = { kid: kidForKey(parsed.public_key_b64) };
+
+    // ── 2b. on-chain facts (spec §12.4) — only kinds that describe an on-chain event ───────────────
+    if (opts.checkOnchain === true || policy.require.includes('onchain')) {
+      v.levels.onchain = false;
+      if (!KINDS[parsed.kind].onchain) reason('onchain', new codes_KernelError(codes_C.ONCHAIN_NOT_APPLICABLE, `kind ${parsed.kind} carries no on-chain facts`));
+      else {
+        const res = yield { type: 'onchain', signed: parsed.signed, ctx: { rpcUrls: opts.rpc?.[`eip155:${parsed.signed.chain_id}`], policy, fetchImpl: opts.fetchImpl, timeoutMs: opts.timeoutMs, lookup: registryLookup(tokenRegistry) } };
+        if (res === null) reason('onchain', new codes_KernelError(codes_C.ONCHAIN_NOT_CHECKED, 'offline (synchronous) verification does not recompute on-chain facts — use verify()'));
+        else if (res.error) reason('onchain', res.error);
+        else { v.levels.onchain = true; v.onchain = res.facts; }
+      }
+    }
 
     // ── 3. time proofs (before trust: a revoked key needs one) ──────────────────────────────────
     const wantAnchors = opts.checkAnchors === true || policy.require.includes('time_anchored') || policy.require.includes('finalized');
@@ -8810,16 +9279,16 @@ function* core(input, opts) {
       v.levels.time_anchored = false; v.levels.finalized = false;
       let refs;
       try {
-        const raw = opts.anchors !== undefined ? toValue(opts.anchors, 'anchors', true) : own(receipt, 'anchors') ? receipt.anchors : own(receipt, 'anchor') ? [receipt.anchor] : [];
+        const raw = opts.anchors !== undefined ? toValue(opts.anchors, 'anchors', true) : hygiene_own(receipt, 'anchors') ? receipt.anchors : hygiene_own(receipt, 'anchor') ? [receipt.anchor] : [];
         refs = Array.isArray(raw) ? raw : [raw];
-        if (refs.length === 0) throw new codes_KernelError(C.NO_ANCHOR, 'no anchor reference supplied');
-        if (refs.length > 8) throw new codes_KernelError(C.ANCHOR_REF_MALFORMED, 'more than 8 anchor references');
+        if (refs.length === 0) throw new codes_KernelError(codes_C.NO_ANCHOR, 'no anchor reference supplied');
+        if (refs.length > 8) throw new codes_KernelError(codes_C.ANCHOR_REF_MALFORMED, 'more than 8 anchor references');
       } catch (e) { reason('time_anchored', e); refs = []; }
       if (opts.solanaSigners) v.overrides.push('solanaSigners');
       const roots = opts.roots ?? BAKED_ROOTS;
       const ids = anchorIds(parsed);
-      const recs = yield { refs, base: { roots, ids, signedTime: parsed.signed_time, policy, fetchImpl: opts.fetchImpl, timeoutMs: opts.timeoutMs, rpc: opts.rpc, solanaSigners: opts.solanaSigners } };
-      if (recs === null) v.reasons.push({ level: 'time_anchored', code: C.NO_ANCHOR, detail: 'offline (synchronous) verification does not evaluate anchors — use verify()' });
+      const recs = yield { type: 'anchors', refs, base: { roots, ids, signedTime: parsed.signed_time, policy, fetchImpl: opts.fetchImpl, timeoutMs: opts.timeoutMs, rpc: opts.rpc, solanaSigners: opts.solanaSigners } };
+      if (recs === null) v.reasons.push({ level: 'time_anchored', code: codes_C.NO_ANCHOR, detail: 'offline (synchronous) verification does not evaluate anchors — use verify()' });
       for (const rec of recs || []) {
         if (rec.reason) v.reasons.push({ level: 'time_anchored', code: rec.reason.code, detail: `${rec.ref ?? 'anchor'}: ${rec.reason.detail}` });
         v.anchors.push(rec);
@@ -8829,7 +9298,7 @@ function* core(input, opts) {
         v.levels.time_anchored = true;
         anchorTime = Math.min(...counted.map((a) => a.facts.time));
         v.levels.finalized = counted.some((a) => a.facts.finalized === true);
-        if (!v.levels.finalized) v.reasons.push({ level: 'finalized', code: C.NOT_FINALIZED, detail: 'no counted anchor is in a finalized block yet' });
+        if (!v.levels.finalized) v.reasons.push({ level: 'finalized', code: codes_C.NOT_FINALIZED, detail: 'no counted anchor is in a finalized block yet' });
       }
     }
 
@@ -8838,15 +9307,15 @@ function* core(input, opts) {
       const kindSpec = KINDS[parsed.kind];
       if (opts.trustedKeys !== undefined) {
         const set = toValue(opts.trustedKeys, 'trustedKeys', true);
-        if (!Array.isArray(set) || set.length === 0 || set.some((k) => typeof k !== 'string')) throw new codes_KernelError(C.NO_TRUST_SOURCE, 'trustedKeys must be a non-empty array of base64 keys');
+        if (!Array.isArray(set) || set.length === 0 || set.some((k) => typeof k !== 'string')) throw new codes_KernelError(codes_C.NO_TRUST_SOURCE, 'trustedKeys must be a non-empty array of base64 keys');
         v.overrides.push('trustedKeys'); v.trust_basis = 'override';
-        if (parsed.signed_time !== null && parsed.signed_time > now + policy.skew) throw new codes_KernelError(C.SIGNED_TIME_IN_FUTURE, `signed time ${parsed.signed_time} is in the future`);
-        if (!set.includes(parsed.public_key_b64)) throw new codes_KernelError(C.KEY_NOT_IN_PINNED_SET, 'signing key is not in the pinned trustedKeys set');
+        if (parsed.signed_time !== null && parsed.signed_time > now + policy.skew) throw new codes_KernelError(codes_C.SIGNED_TIME_IN_FUTURE, `signed time ${parsed.signed_time} is in the future`);
+        if (!set.includes(parsed.public_key_b64)) throw new codes_KernelError(codes_C.KEY_NOT_IN_PINNED_SET, 'signing key is not in the pinned trustedKeys set');
         v.key.time_basis = parsed.signed_time === null ? 'verification-time' : 'signed';
         v.levels.trusted = true;
       } else {
-        if (kindSpec.trust === 'pinned-set-only') throw new codes_KernelError(C.SELF_ATTEST_NOT_TRUSTED, 'a self-attest seal is signed by the seller; only an explicit trustedKeys set can trust it');
-        if (opts.directory === undefined) throw new codes_KernelError(C.NO_TRUST_SOURCE, 'no key directory supplied');
+        if (kindSpec.trust === 'pinned-set-only') throw new codes_KernelError(codes_C.SELF_ATTEST_NOT_TRUSTED, 'a self-attest seal is signed by the seller; only an explicit trustedKeys set can trust it');
+        if (opts.directory === undefined) throw new codes_KernelError(codes_C.NO_TRUST_SOURCE, 'no key directory supplied');
         const roots = opts.roots ?? BAKED_ROOTS;
         if (opts.roots) v.overrides.push('roots');
         let governanceKeyB64 = roots.governance?.public_key_b64;
@@ -8860,7 +9329,7 @@ function* core(input, opts) {
         v.directory = { epoch: d.epoch, root: d.root, chain_epochs: d.chain_epochs, checkpoint_epoch: checkpoint?.epoch ?? null };
         v.trust_basis = unpinned ? 'tls' : (opts.roots || opts.governanceKey !== undefined) ? 'override' : 'pinned-root';
         const entry = d.keys.find((k) => k.public_key_b64 === parsed.public_key_b64);
-        if (!entry) throw new codes_KernelError(C.KEY_NOT_LISTED, `key ${v.key.kid} is not in directory epoch ${d.epoch}`);
+        if (!entry) throw new codes_KernelError(codes_C.KEY_NOT_LISTED, `key ${v.key.kid} is not in directory epoch ${d.epoch}`);
         Object.assign(v.key, { use: entry.use, status: entry.status, not_before: entry.not_before ?? null, not_after: entry.not_after ?? null, revoked_at: entry.revoked_at ?? null });
         const a = keyAuthorizes(entry, { uses: kindSpec.uses, signedTime: parsed.signed_time, now, anchorTime, skew: policy.skew });
         v.key.evaluated_at = a.evaluated_at; v.key.time_basis = a.time_basis;
@@ -8883,38 +9352,90 @@ async function evaluateAnchors({ refs, base }) {
   for (const ref of refs) {
     const rec = { ref: null, ok: false, counts: false, facts: null, reason: null };
     try {
-      if (!isPlainObject(ref)) throw new codes_KernelError(C.ANCHOR_REF_MALFORMED, 'anchor reference is not an object');
+      if (!isPlainObject(ref)) throw new codes_KernelError(codes_C.ANCHOR_REF_MALFORMED, 'anchor reference is not an object');
       const isSol = ref.chain === 'solana';
       rec.ref = isSol ? `solana:${ref.cluster}` : `eip155:${ref.chain_id}`;
       const ctx = { ...base, rpcUrls: base.rpc?.[rec.ref] };
       const f = isSol ? await verifySolanaAnchor(ref, ctx) : await verifyEvmAnchor(ref, ctx);
       rec.ok = true; rec.facts = f;
-      if (f.network_class !== 'production' && !base.policy.allowTestnetAnchors) throw new codes_KernelError(C.ANCHOR_TESTNET_NOT_ALLOWED, `${rec.ref} is a test network; policy.allowTestnetAnchors is false`);
-      if (base.policy.requireKnownAnchorer && !f.anchorer_known) throw new codes_KernelError(C.ANCHOR_ANCHORER_UNKNOWN, `anchored by ${f.anchored_by}, not a known FractalAI anchorer`);
+      if (f.network_class !== 'production' && !base.policy.allowTestnetAnchors) throw new codes_KernelError(codes_C.ANCHOR_TESTNET_NOT_ALLOWED, `${rec.ref} is a test network; policy.allowTestnetAnchors is false`);
+      if (base.policy.requireKnownAnchorer && !f.anchorer_known) throw new codes_KernelError(codes_C.ANCHOR_ANCHORER_UNKNOWN, `anchored by ${f.anchored_by}, not a known FractalAI anchorer`);
       rec.counts = true;
     } catch (e) {
-      rec.reason = { code: e instanceof codes_KernelError ? e.code : C.INTERNAL, detail: e instanceof codes_KernelError ? e.detail : String(e?.message ?? e) };
+      rec.reason = { code: e instanceof codes_KernelError ? e.code : codes_C.INTERNAL, detail: e instanceof codes_KernelError ? e.detail : String(e?.message ?? e) };
     }
     out.push(rec);
   }
   return out;
 }
 
-/** Full verification (anchors evaluated over the network when requested). Never throws. */
+async function evaluateOnchain({ signed, ctx }) {
+  try { return { facts: await verifyStablecoinPayment(signed, ctx) }; }
+  catch (e) { return { error: e instanceof codes_KernelError ? e : new codes_KernelError(codes_C.INTERNAL, String(e?.message ?? e)) }; }
+}
+
+/** Full verification (anchors / on-chain facts evaluated over the network when requested). Never throws. */
 async function verify(input, opts = {}) {
   const it = core(input, opts || {});
   let r = it.next();
-  while (!r.done) r = it.next(await evaluateAnchors(r.value));
+  while (!r.done) r = it.next(r.value.type === 'onchain' ? await evaluateOnchain(r.value) : await evaluateAnchors(r.value));
   return r.value;
 }
 
-/** Offline, synchronous verification: identical decision, anchors are never evaluated (time levels stay
- * null, or false with NO_ANCHOR when the policy requires them). */
+/** Offline, synchronous verification: identical decision, anchors and on-chain facts are never evaluated
+ * (those levels stay null, or false with NO_ANCHOR / ONCHAIN_NOT_CHECKED when the policy requires them). */
 function verifySync(input, opts = {}) {
   const it = core(input, opts || {});
   let r = it.next();
   while (!r.done) r = it.next(null);
   return r.value;
+}
+
+;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/locate.mjs
+// Locating the FractalAI key directory (FRACTALAI-key-directory-v1) when /.well-known/x402-receipt-keys
+// carries the x402 delivery-receipt format instead.
+//
+// Why: the x402 delivery-receipt spec (§7.1) reserves `<issuer>/.well-known/x402-receipt-keys` for its own
+// directory format (`x402-receipt-key-directory/1`). FractalAI's chain of epochs 1..n predates that format
+// and lived at the same path. It moves, byte for byte, to LEGACY_DIRECTORY_PATH. Receipts already signed
+// embed the old URL in their signed bytes and can never be changed, so a verifier that is handed that URL
+// must still find the chain: this resolver fetches the URL and, if what it gets is not a
+// FRACTALAI-key-directory-v1 document, fetches the legacy path ON THE SAME ORIGIN and requires that one to
+// be. It never follows a document's own pointer (a forged directory cannot redirect the verifier), and
+// it never accepts the spec-format document as a FractalAI epoch.
+
+
+
+const LEGACY_DIRECTORY_SPEC = 'FRACTALAI-key-directory-v1';
+const LEGACY_DIRECTORY_PATH = '/.well-known/fractalai-key-directory';
+const SPEC_DIRECTORY_PATH = '/.well-known/x402-receipt-keys';
+
+const specOf = (text) => {
+  try { const d = parseJsonStrict(text); return d && typeof d === 'object' && !Array.isArray(d) ? d.spec : undefined; }
+  catch { return undefined; }
+};
+
+/**
+ * Fetch the FractalAI key directory text starting from `url`.
+ * @param {string} url            a directory URL (legacy or spec path) on the issuer's origin
+ * @param {object} [opts]         passed to boundedFetch (fetchImpl, timeoutMs, ...)
+ * @returns {Promise<{ text: string, url: string, relocated: boolean }>}
+ */
+async function fetchLegacyDirectory(url, opts = {}) {
+  const get = (u) => boundedFetch(u, { headers: { accept: 'application/json' }, ...opts });
+  let first;
+  try { first = await get(url); } catch (e) { first = e; }
+  if (typeof first === 'string' && specOf(first) === LEGACY_DIRECTORY_SPEC) return { text: first, url, relocated: false };
+  const alt = new URL(LEGACY_DIRECTORY_PATH, url).href;
+  if (alt === url) {
+    if (first instanceof Error) throw first;
+    throw new codes_KernelError(codes_C.DIRECTORY_INVALID, `${url} is not a ${LEGACY_DIRECTORY_SPEC} document`);
+  }
+  const text = await get(alt);
+  if (specOf(text) !== LEGACY_DIRECTORY_SPEC) {
+    throw new codes_KernelError(codes_C.DIRECTORY_INVALID, `neither ${url} nor ${alt} is a ${LEGACY_DIRECTORY_SPEC} document`);
+  }
+  return { text, url: alt, relocated: true };
 }
 
 ;// CONCATENATED MODULE: ./vendor/pqc-receipts-colosseum/kernel/src/index.mjs
@@ -8935,8 +9456,12 @@ function verifySync(input, opts = {}) {
 
 
 
+
+
+
+
 ;// CONCATENATED MODULE: ./vendor/VENDOR.json
-const VENDOR_namespaceObject = /*#__PURE__*/JSON.parse('{"cd":"b9e1967e9d6c6825e025f701a6752eac95c2f2e7"}');
+const VENDOR_namespaceObject = /*#__PURE__*/JSON.parse('{"cd":"df081e835c3c341f288495ee675d6b1bfdf39b96"}');
 ;// CONCATENATED MODULE: ./src/index.js
 // SPDX-License-Identifier: Apache-2.0
 /**
@@ -9050,10 +9575,13 @@ const isReceiptId = (s) => /^[0-9a-fA-F]{64}$/.test(s);
 
 /** GET with the kernel's boundedFetch (one deadline, streamed byte cap, no redirects, https or loopback);
  * up to 3 attempts on transient failures only. A retry can never turn into "valid": the kernel decides. */
-async function fetchText(url) {
+async function fetchText(url, { directory = false } = {}) {
+  const opts = { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/2' }, timeoutMs: FETCH_TIMEOUT_MS, maxBytes: MAX_BODY_BYTES };
   for (let attempt = 1; ; attempt++) {
     try {
-      return await boundedFetch(url, { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/2' }, timeoutMs: FETCH_TIMEOUT_MS, maxBytes: MAX_BODY_BYTES });
+      // Key directory: kernel 2.3 relocation rule (same-origin /.well-known/fractalai-key-directory when the
+      // stable path carries the x402 spec format). Never follows a pointer inside a fetched document.
+      return directory ? (await fetchLegacyDirectory(url, opts)).text : await boundedFetch(url, opts);
     } catch (e) {
       const detail = String(e?.detail ?? e?.message ?? e);
       const transient = e?.code === 'RPC_ERROR' && /timeout after|failed:|HTTP (5\d\d|429)\b/.test(detail);
@@ -9064,22 +9592,6 @@ async function fetchText(url) {
     await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
   }
 }
-/** Fixed same-origin relocation, matching Trust Kernel 2.3 locate.mjs. Pins remain unchanged. */
-async function fetchLegacyDirectoryText(url) {
-  const isLegacy = (raw) => { try { return parseJsonStrict(raw)?.spec === 'FRACTALAI-key-directory-v1'; } catch { return false; } };
-  let first;
-  try { first = await fetchText(url); } catch (e) { first = e; }
-  if (typeof first === 'string' && isLegacy(first)) return first;
-  const alternate = new URL('/.well-known/fractalai-key-directory', url).href;
-  if (alternate === url) {
-    if (first instanceof Error) throw first;
-    throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
-  }
-  const raw = await fetchText(alternate);
-  if (!isLegacy(raw)) throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
-  return raw;
-}
-
 /** A value that is either inline JSON or a workspace file holding JSON (returned raw, never re-serialised). */
 function jsonOrFile(name) {
   const v = getInput(name);
@@ -9149,11 +9661,13 @@ async function buildCall() {
   const req = listInput('require');
   if (req.length) opts.policy.require = req;
   opts.policy.allowTestnetAnchors = boolInput('allow-testnet-anchors', false);
+  opts.policy.allowUnfinalizedPayment = boolInput('allow-unfinalized-payment', false);
   opts.policy.requireKnownAnchorer = boolInput('require-known-anchorer', false);
   for (const [inp, key] of [['min-confirmations', 'minConfirmations'], ['rpc-quorum', 'rpcQuorum'], ['max-clock-skew-sec', 'maxClockSkewSec']]) {
     const n = intInput(inp); if (n !== undefined) opts.policy[key] = n;
   }
   if (boolInput('anchors', false)) opts.checkAnchors = true;
+  if (boolInput('onchain', false)) opts.checkOnchain = true;
   const anchorRefs = jsonOrFile('anchor-refs');
   if (anchorRefs !== undefined) opts.anchors = anchorRefs;
   const rpc = parseRpc(getInput('rpc'));
@@ -9216,7 +9730,7 @@ async function buildCall() {
 
   // ── trust source: pinned set (override) or the key directory (verified against the pinned roots) ──
   if (opts.trustedKeys === undefined && directoryInput !== '') {
-    opts.directory = isHttpUrl(directoryInput) ? await fetchLegacyDirectoryText(directoryInput) : readRaw(directoryInput);
+    opts.directory = isHttpUrl(directoryInput) ? await fetchText(directoryInput, { directory: true }) : readRaw(directoryInput);
     const hist = directoryHistory(getInput('directory-history'));
     if (hist !== undefined) opts.directoryHistory = hist;
   }

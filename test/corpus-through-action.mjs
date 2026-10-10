@@ -21,7 +21,8 @@ import { parseJsonStrict, sha256hex, jcs } from '../vendor/pqc-receipts-colosseu
 
 const CORPUS = path.join(ROOT, 'vendor', 'pqc-receipts-colosseum', 'corpus');
 const SHIM = new URL('./support/corpus-shim.mjs', import.meta.url).href;
-const LEVELS = ['integrity', 'authentic', 'trusted', 'time_anchored', 'finalized'];
+// Levels come from the vendored kernel, so a new level can never be silently left out of the comparison.
+import { LEVELS } from '../vendor/pqc-receipts-colosseum/kernel/src/codes.mjs';
 
 export function loadCorpus() {
   const manifest = parseJsonStrict(readFileSync(path.join(CORPUS, 'manifest.json'), 'utf8'));
@@ -81,16 +82,20 @@ export function vectorToStep(vec, slot, server) {
   if (o.governance_key !== undefined) inputs['governance-key'] = o.governance_key;
   if (o.allow_tls_directory === true) inputs['allow-tls-directory'] = 'true';
   if (o.check_anchors === true) inputs.anchors = 'true';
+  if (o.check_onchain === true) inputs.onchain = 'true';
   if (o.anchors !== undefined) { files['anchor-refs.json'] = JSON.stringify(o.anchors); inputs['anchor-refs'] = 'anchor-refs.json'; }
   if (o.rpc !== undefined) inputs.rpc = Object.entries(o.rpc).flatMap(([chain, urls]) => urls.map((u) => `${chain}=${server.url(slot, u)}`)).join('\n');
   if (o.solana_signers !== undefined) inputs['solana-signers'] = o.solana_signers.join(',');
   if (p.require !== undefined) inputs.require = p.require.join(',');
   if (p.allow_testnet_anchors !== undefined) inputs['allow-testnet-anchors'] = String(p.allow_testnet_anchors);
+  if (p.allow_unfinalized_payment !== undefined) inputs['allow-unfinalized-payment'] = String(p.allow_unfinalized_payment);
   if (p.require_known_anchorer !== undefined) inputs['require-known-anchorer'] = String(p.require_known_anchorer);
   if (p.min_confirmations !== undefined) inputs['min-confirmations'] = String(p.min_confirmations);
   if (p.rpc_quorum !== undefined) inputs['rpc-quorum'] = String(p.rpc_quorum);
   if (p.max_clock_skew_sec !== undefined) inputs['max-clock-skew-sec'] = String(p.max_clock_skew_sec);
-  const known = new Set(['kind', 'kinds', 'expected_id', 'trusted_keys', 'governance_key', 'allow_tls_directory', 'check_anchors', 'anchors', 'rpc', 'solana_signers', 'policy']);
+  const known = new Set(['kind', 'kinds', 'expected_id', 'trusted_keys', 'governance_key', 'allow_tls_directory', 'check_anchors', 'check_onchain', 'anchors', 'rpc', 'solana_signers', 'policy']);
+  const knownPolicy = new Set(['require', 'allow_testnet_anchors', 'allow_unfinalized_payment', 'require_known_anchorer', 'min_confirmations', 'rpc_quorum', 'max_clock_skew_sec']);
+  for (const k of Object.keys(p)) if (!knownPolicy.has(k)) throw new Error(`${vec.id}: corpus policy option ${k} has no Action input mapping`);
   for (const k of Object.keys(o)) if (!known.has(k)) throw new Error(`${vec.id}: corpus option ${k} has no Action input mapping`);
   const extraEnv = { CORPUS_SHIM_NOW: String(ctx.now) };
   if (vec.input.prime_json) { files['.prime.json'] = JSON.stringify(vec.input.prime_json); }

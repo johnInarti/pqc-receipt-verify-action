@@ -15,6 +15,28 @@ SHA is the entire trust boundary.
 
 ---
 
+## v2.2.0
+
+**PQC Receipt Verify — vendors Trust Kernel 2.3** (`johnInarti/pqc-receipts-colosseum@df081e8`, 272 files,
+byte-exact; `npm run vendor:check`).
+
+- **Key directory relocation.** The x402 delivery-receipt spec reserves `/.well-known/x402-receipt-keys` for its
+  own format. When that URL no longer serves `FRACTALAI-key-directory-v1`, the kernel's `fetchLegacyDirectory`
+  reads `/.well-known/fractalai-key-directory` on the same origin. No document-supplied pointer is followed and
+  the pinned roots are unchanged. The in-Action copy of this rule from the previous commit was removed: the
+  kernel owns it, so `src/` keeps no trust logic of its own. Its black-box tests (`test/relocation.test.mjs`) stay.
+- **New level `onchain`** (kernel 2.1/2.2): new input `onchain`, new input `allow-unfinalized-payment`, new
+  output `onchain`. The summary table has one more row.
+- **Corpus 129 → 217 vectors**, all executed through `dist/`. The harness now takes the level list from the
+  kernel and refuses any corpus policy option it does not map, so a new level or flag can no longer be
+  skipped silently.
+
+Tests: 55/55 on Node 20.20.2 and 26.5.0.
+
+**PQC Readiness Scan — unchanged** (byte-identical to v2.1.0).
+
+---
+
 ## v2.1.0
 
 **PQC Readiness Scan — first release.** A second, independent Action that scans any repository for

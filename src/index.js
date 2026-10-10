@@ -14,7 +14,7 @@ import { appendFileSync, readFileSync, realpathSync, statSync, existsSync } from
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
-  verify, boundedFetch, parseJsonStrict, b64decodeStrict, oneLine as kernelOneLine,
+  verify, boundedFetch, fetchLegacyDirectory, parseJsonStrict, b64decodeStrict, oneLine as kernelOneLine,
   KERNEL_ID, SPEC_VERSION, LEVELS, KIND_NAMES, EXIT, SELF_TEST, ML_DSA_65_PK_BYTES,
 } from '../vendor/pqc-receipts-colosseum/kernel/src/index.mjs';
 import VENDOR from '../vendor/VENDOR.json' with { type: 'json' };
@@ -113,10 +113,13 @@ const isReceiptId = (s) => /^[0-9a-fA-F]{64}$/.test(s);
 
 /** GET with the kernel's boundedFetch (one deadline, streamed byte cap, no redirects, https or loopback);
  * up to 3 attempts on transient failures only. A retry can never turn into "valid": the kernel decides. */
-async function fetchText(url) {
+async function fetchText(url, { directory = false } = {}) {
+  const opts = { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/2' }, timeoutMs: FETCH_TIMEOUT_MS, maxBytes: MAX_BODY_BYTES };
   for (let attempt = 1; ; attempt++) {
     try {
-      return await boundedFetch(url, { headers: { accept: 'application/json', 'user-agent': 'pqc-receipt-verify-action/2' }, timeoutMs: FETCH_TIMEOUT_MS, maxBytes: MAX_BODY_BYTES });
+      // Key directory: kernel 2.3 relocation rule (same-origin /.well-known/fractalai-key-directory when the
+      // stable path carries the x402 spec format). Never follows a pointer inside a fetched document.
+      return directory ? (await fetchLegacyDirectory(url, opts)).text : await boundedFetch(url, opts);
     } catch (e) {
       const detail = String(e?.detail ?? e?.message ?? e);
       const transient = e?.code === 'RPC_ERROR' && /timeout after|failed:|HTTP (5\d\d|429)\b/.test(detail);
@@ -127,22 +130,6 @@ async function fetchText(url) {
     await new Promise((r) => setTimeout(r, 1000 * 2 ** (attempt - 1)));
   }
 }
-/** Fixed same-origin relocation, matching Trust Kernel 2.3 locate.mjs. Pins remain unchanged. */
-async function fetchLegacyDirectoryText(url) {
-  const isLegacy = (raw) => { try { return parseJsonStrict(raw)?.spec === 'FRACTALAI-key-directory-v1'; } catch { return false; } };
-  let first;
-  try { first = await fetchText(url); } catch (e) { first = e; }
-  if (typeof first === 'string' && isLegacy(first)) return first;
-  const alternate = new URL('/.well-known/fractalai-key-directory', url).href;
-  if (alternate === url) {
-    if (first instanceof Error) throw first;
-    throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
-  }
-  const raw = await fetchText(alternate);
-  if (!isLegacy(raw)) throw inputError('legacy directory format required', 'DIRECTORY_INVALID');
-  return raw;
-}
-
 /** A value that is either inline JSON or a workspace file holding JSON (returned raw, never re-serialised). */
 function jsonOrFile(name) {
   const v = getInput(name);
@@ -212,11 +199,13 @@ async function buildCall() {
   const req = listInput('require');
   if (req.length) opts.policy.require = req;
   opts.policy.allowTestnetAnchors = boolInput('allow-testnet-anchors', false);
+  opts.policy.allowUnfinalizedPayment = boolInput('allow-unfinalized-payment', false);
   opts.policy.requireKnownAnchorer = boolInput('require-known-anchorer', false);
   for (const [inp, key] of [['min-confirmations', 'minConfirmations'], ['rpc-quorum', 'rpcQuorum'], ['max-clock-skew-sec', 'maxClockSkewSec']]) {
     const n = intInput(inp); if (n !== undefined) opts.policy[key] = n;
   }
   if (boolInput('anchors', false)) opts.checkAnchors = true;
+  if (boolInput('onchain', false)) opts.checkOnchain = true;
   const anchorRefs = jsonOrFile('anchor-refs');
   if (anchorRefs !== undefined) opts.anchors = anchorRefs;
   const rpc = parseRpc(getInput('rpc'));
@@ -279,7 +268,7 @@ async function buildCall() {
 
   // ── trust source: pinned set (override) or the key directory (verified against the pinned roots) ──
   if (opts.trustedKeys === undefined && directoryInput !== '') {
-    opts.directory = isHttpUrl(directoryInput) ? await fetchLegacyDirectoryText(directoryInput) : readRaw(directoryInput);
+    opts.directory = isHttpUrl(directoryInput) ? await fetchText(directoryInput, { directory: true }) : readRaw(directoryInput);
     const hist = directoryHistory(getInput('directory-history'));
     if (hist !== undefined) opts.directoryHistory = hist;
   }

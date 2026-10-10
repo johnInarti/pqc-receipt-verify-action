@@ -7,9 +7,9 @@ import path from 'node:path';
 import { checkVendored } from '../scripts/vendor-kernel.mjs';
 import { ROOT } from './support/runner.mjs';
 
-test('vendor/pqc-receipts-colosseum is byte-identical to johnInarti/pqc-receipts-colosseum@b9e1967 (git blob ids)', () => {
+test('vendor/pqc-receipts-colosseum is byte-identical to johnInarti/pqc-receipts-colosseum@df081e8 (git blob ids)', () => {
   const { man, errs, count } = checkVendored();
-  assert.equal(man.commit, 'b9e1967e9d6c6825e025f701a6752eac95c2f2e7');
+  assert.equal(man.commit, 'df081e835c3c341f288495ee675d6b1bfdf39b96');
   assert.deepEqual(errs, []); assert.ok(count >= 170);
 });
 test('src/ contains no cryptography or trust logic of its own: only the vendored kernel decides', () => {

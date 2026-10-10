@@ -7,7 +7,8 @@
  *   node corpus/gen.mjs
  */
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
-import { parseJsonStrict, sha256hex, jcs, b64encode, BAKED_ROOTS } from '../kernel/src/index.mjs';
+import { parseJsonStrict, sha256hex, jcs, b64encode, BAKED_ROOTS, formatUnits } from '../kernel/src/index.mjs';
+import { replayFetch } from './lib/replay.mjs';
 import * as S from './lib/synth.mjs';
 
 const here = (p) => new URL(p, import.meta.url);
@@ -321,6 +322,212 @@ for (const [n, m] of [['uppercase-rid', MEMO.replace(ridHex, ridHex.toUpperCase(
   V(`N-RTS1c-memo-${n}`, synSol(`Memo encoding trick: ${n}`, ['redteam-anchor:RT-S1c', 'redteam-anchor:RT-S5'], S.solMessage({ payer: SIG.pub, extraKeys: [S.MEMO_PROGRAM_ID], ixs: [S.memoIx(1, m)] }), ['SOL_MEMO_MISMATCH']));
 }
 V('N-RTS-blocktime-before-signed', synSol('blockTime long before the signed emitted_at (forward-dated receipt)', ['redteam-anchor:RT-E5 (Solana)'], S.solMessage({ payer: SIG.pub, extraKeys: [S.MEMO_PROGRAM_ID], ixs: [S.memoIx(1, MEMO)] }), ['ANCHOR_FORWARD_DATED'], { tOpts: { blockTime: 1780000000 } }));
+
+// ═══════════════ latam-stablecoin-receipt (spec §12): REAL transfers of COPM / BRLA / MXNB, replayed ═══════════════
+// Positives: real Transfer logs read by eth_getLogs on 2026-10-08 and recorded (corpus/record-stablecoins.mjs) from
+// public RPCs; each receipt is produced by the real issuer (issuer/src/issue.mjs) over the replayed transcript and signed
+// by a deterministic TEST key listed (use "stablecoin-receipt") in a TEST directory. Negatives: the same real facts
+// altered by a document forger (A1), signed by a compromised/buggy signer (A4), or served by a lying RPC (A6).
+{
+  const { issueStablecoinReceipt, signTransfer } = await import('../issuer/src/issue.mjs');
+  const SC = (n) => read(`./fixtures/stablecoin/${n}.json`);
+  const FX = { copm: SC('copm-polygon'), brlaP: SC('brla-polygon'), brlaB: SC('brla-base'), mxnbA: SC('mxnb-arbitrum'), mxnbB: SC('mxnb-base-swap') };
+  const SCREF = (n) => REF(`fixtures/stablecoin/${n}.json#transcript`);
+  const tsOf = (fx) => Math.floor(Date.parse(fx.recorded_at) / 1000);
+  const KS = S.mlKey('stablecoin-issuer'), KX = S.mlKey('x402-only'), KSR = S.mlKey('stablecoin-reserved');
+  const keyOf = (k) => ({ secretKey: k.sk, publicKeyB64: k.pk });
+  const DS = S.directory([
+    { key: KS, use: 'stablecoin-receipt', status: 'active', not_before: 1790000000 },
+    { key: KX, use: 'x402-receipt', status: 'active', not_before: 1790000000 },
+    { key: KSR, use: 'stablecoin-receipt', status: 'reserved' },
+  ], GOV, { epoch: 3, prevRoot: sha256hex('stablecoin-epoch-2') });
+  const TRS = S.testRoots(GOV, DS);
+  const KIND = 'latam-stablecoin-receipt';
+  const REQ = ['integrity', 'authentic', 'trusted', 'onchain'];
+  const LS = (i, a, t, o) => ({ ...L(i, a, t), onchain: o });
+  const OKS = LS(true, true, true, true);
+  const replayOf = (fx) => replayFetch(fx.transcript);
+
+  const issue = async (fx, labels, o = {}) => (await issueStablecoinReceipt({
+    chainId: fx.chain_id, txHash: fx.tx_hash, logIndex: fx.log_index, rpcUrls: labels, key: keyOf(o.key ?? KS), now: tsOf(fx),
+    deterministic: true, selfVerify: false, fetchImpl: replayOf(fx), reference: o.reference ?? '', requireFinalized: o.requireFinalized ?? true,
+  })).receipt;
+  const R = {
+    copm: await issue(FX.copm, ['replay://polygon', 'replay://polygon-1rpc'], { reference: 'factura:FE-2026-000123' }),
+    brlaP: await issue(FX.brlaP, ['replay://polygon']),
+    brlaB: await issue(FX.brlaB, ['replay://base']),
+    mxnbA: await issue(FX.mxnbA, ['replay://arb1']),
+    mxnbB: await issue(FX.mxnbB, ['replay://base']),
+  };
+  const resign = (base, mut, key = KS) => { const f = { ...base.transfer }; mut(f); return signTransfer(f, keyOf(key), { deterministic: true }); };
+  const ctxS = (fx, rpc, o = {}) => ({
+    now: tsOf(fx) + 600, roots: TRS, directory: DS,
+    options: { kind: KIND, check_onchain: true, rpc, policy: { require: REQ, ...(o.policy || {}) }, ...(o.options || {}) },
+    rpc_transcript: o.transcript ?? [SCREF(fx === FX.copm ? 'copm-polygon' : fx === FX.brlaP ? 'brla-polygon' : fx === FX.brlaB ? 'brla-base' : fx === FX.mxnbA ? 'mxnb-arbitrum' : 'mxnb-base-swap')],
+  });
+  const P137 = { 'eip155:137': ['replay://polygon'] }, P137Q = { 'eip155:137': ['replay://polygon', 'replay://polygon-1rpc'] };
+  const B8453 = { 'eip155:8453': ['replay://base'] }, A42161 = { 'eip155:42161': ['replay://arb1'] }, A42161Q = { 'eip155:42161': ['replay://arb1', 'replay://arb1-1rpc'] };
+  const mutT = (fx, fn) => { const t = clone(fx.transcript); fn(t); return t; };
+  const rcOf = (t, url = null) => t.find((x) => x.method === 'eth_getTransactionReceipt' && (url === null || x.url === url)).result;
+  const blkOf = (t, url = null) => t.find((x) => x.method === 'eth_getBlockByNumber' && x.params[0] !== 'finalized' && (url === null || x.url === url));
+  const logAt = (t, i, url = null) => rcOf(t, url).logs.find((l) => parseInt(l.logIndex, 16) === i);
+
+  // ── positives (real data) ──
+  V('P30-stablecoin-copm-polygon-two-rpcs', { title: 'REAL COPM transfer on Polygon (667,703 COPM), issued by the issuer, re-verified on-chain against two independent public RPCs (quorum 2)', source: ['real:polygon:0x5cd84fa7…420b#2229'], input: { receipt: R.copm }, context: ctxS(FX.copm, P137Q, { policy: { rpcQuorum: 2 } }), expect: { valid: true, levels: OKS, trust_basis: 'override', exit_code: 0 } });
+  V('P31-stablecoin-brla-polygon', { title: 'REAL BRLA transfer on Polygon (8.4 BRLA), recomputed from the chain', source: ['real:polygon:0x24f4d154…a387#593'], input: { receipt: R.brlaP }, context: ctxS(FX.brlaP, P137), expect: { valid: true, levels: OKS, trust_basis: 'override' } });
+  V('P32-stablecoin-brla-base', { title: 'REAL BRLA transfer on Base (48.52 BRLA), recomputed from the chain', source: ['real:base:0xb0928204…dd1e#1011'], input: { receipt: R.brlaB }, context: ctxS(FX.brlaB, B8453), expect: { valid: true, levels: OKS } });
+  V('P33-stablecoin-mxnb-arbitrum', { title: 'REAL MXNB transfer on Arbitrum One (135 MXNB), recomputed from the chain', source: ['real:arbitrum:0x54309433…0f66#3'], input: { receipt: R.mxnbA }, context: ctxS(FX.mxnbA, A42161), expect: { valid: true, levels: OKS } });
+  V('P34-stablecoin-mxnb-base-inside-a-swap', { title: 'REAL MXNB leg (log 22) of a multi-token swap on Base — the receipt covers exactly that log', source: ['real:base:0x9963ad6a…d4c8#22'], input: { receipt: R.mxnbB }, context: ctxS(FX.mxnbB, B8453), expect: { valid: true, levels: OKS } });
+  V('P35-stablecoin-offline-default-policy', { title: 'Same COPM receipt verified OFFLINE (default policy): integrity + authentic + trusted, on-chain level not evaluated', input: { receipt: R.copm }, context: { now: tsOf(FX.copm) + 600, roots: TRS, directory: DS, options: { kind: KIND } }, expect: { valid: true, levels: LS(true, true, true, null) } });
+  V('P36-stablecoin-trusted-keys-override', { title: 'Pinned key set (no directory) + on-chain recomputation', input: { receipt: R.brlaP }, context: { now: tsOf(FX.brlaP) + 600, options: { kind: KIND, trusted_keys: [KS.pk], check_onchain: true, rpc: P137, policy: { require: REQ } }, rpc_transcript: [SCREF('brla-polygon')] }, expect: { valid: true, levels: OKS, trust_basis: 'override' } });
+  const mxnbConfirmed = resign(R.mxnbA, (f) => { f.finality = 'confirmed'; });
+  V('P37-stablecoin-confirmed-allowed-by-policy', { title: 'Receipt that claims only "confirmed"; second RPC (real 1rpc answer) does not report the block finalized; policy allows unfinalized payments', source: ['real:arbitrum:1rpc finalized tag lags'], input: { receipt: mxnbConfirmed }, context: ctxS(FX.mxnbA, A42161Q, { policy: { rpcQuorum: 2, allowUnfinalizedPayment: true } }), expect: { valid: true, levels: OKS } });
+
+  // ── A1: document forger (no key) ──
+  const fwd = (r, m) => { const x = clone(r); m(x); return x; };
+  V('N-SC-amount-altered-unsigned-copy', { title: 'Unsigned transfer.amount raised ×10 (what a dashboard reads); signed canonical untouched', input: { receipt: fwd(R.copm, (x) => { x.transfer.amount = x.transfer.amount + '0'; }) }, context: ctxS(FX.copm, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['UNSIGNED_FIELD_MISMATCH'], exit_code: 10 } });
+  V('N-SC-amount-as-json-number', { title: 'Unsigned transfer.amount as a JSON number (1e21-style precision loss would compare "equal" as a double)', source: ['spec:§12.2 strings only (A8)'], input: { receipt_text: JSON.stringify(R.mxnbA).replace(`"amount":"${R.mxnbA.transfer.amount}"`, `"amount":${R.mxnbA.transfer.amount}`) }, context: ctxS(FX.mxnbA, A42161), expect: { valid: false, levels: LS(false, false, false, null), codes: ['UNSIGNED_FIELD_MISMATCH'] } });
+  const altered = fwd(R.copm, (x) => { x.transfer_canonical = x.transfer_canonical.replace(`amount=${x.transfer.amount}\namount_decimal=${x.transfer.amount_decimal}`, `amount=${x.transfer.amount}0\namount_decimal=${x.transfer.amount_decimal}0`); x.transfer_id = sha256hex(x.transfer_canonical); x.signed_message = `FRACTALAI-stablecoin-receipt-v1\n${x.transfer_id}`; x.transfer.amount += '0'; x.transfer.amount_decimal += '0'; });
+  V('N-SC-amount-altered-canonical', { title: 'Signed canonical amount raised ×10 (ids recomputed): the genuine signature does not cover it', input: { receipt: altered }, context: ctxS(FX.copm, P137), expect: { valid: false, levels: LS(true, false, false, null), codes: ['SIGNATURE_INVALID'], exit_code: 11 } });
+  V('N-SC-domain-relabelled', { title: 'Receipt relabelled with the x402 served domain', input: { receipt: fwd(R.brlaP, (x) => { x.domain = 'FRACTALAI-x402-served-v1'; }) }, context: ctxS(FX.brlaP, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['DOMAIN_MISMATCH'] } });
+  V('N-SC-kind-ambiguous-midas-marker', { title: 'Stablecoin receipt carrying a MIDAS `canonical` field', input: { receipt: fwd(R.brlaP, (x) => { x.canonical = 'FRACTALAI-midas-alert-v1'; }) }, context: ctxS(FX.brlaP, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['KIND_AMBIGUOUS'] } });
+  V('N-SC-midas-alert-cannot-claim-onchain', { title: 'A genuine MIDAS alert under a policy that requires the onchain level', input: { receipt: REF('fixtures/midas-fe62b072.json') }, context: realCtx({ options: { check_onchain: true, policy: { require: ['integrity', 'authentic', 'trusted', 'onchain'] } } }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['ONCHAIN_NOT_APPLICABLE'], exit_code: 15 } });
+
+  // ── registry (integrity, offline) — even a validly signed receipt is refused ──
+  V('N-SC-fake-token-same-symbol', { title: 'Receipt (validly signed) for a look-alike contract with symbol COPM / 18 decimals', input: { receipt: resign(R.copm, (f) => { f.token = '0x00000000000000000000000000000000c0b1dead'; }) }, context: ctxS(FX.copm, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['TOKEN_NOT_PINNED'] } });
+  V('N-SC-wrong-chain-in-receipt', { title: 'Receipt claims chain 8453 (Base) for the Polygon COPM address', input: { receipt: resign(R.copm, (f) => { f.chain_id = '8453'; }) }, context: ctxS(FX.copm, B8453), expect: { valid: false, levels: LS(false, false, false, null), codes: ['TOKEN_NOT_PINNED'] } });
+  V('N-SC-pinned-token-wrong-symbol', { title: 'Real COPM address labelled COPW', input: { receipt: resign(R.copm, (f) => { f.token_symbol = 'COPW'; }) }, context: ctxS(FX.copm, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['TOKEN_METADATA_MISMATCH'] } });
+  V('N-SC-amount-decimal-mismatch', { title: 'amount_decimal does not render amount at the pinned decimals', input: { receipt: resign(R.mxnbA, (f) => { f.amount_decimal = '135000000'; }) }, context: ctxS(FX.mxnbA, A42161), expect: { valid: false, levels: LS(false, false, false, null), codes: ['AMOUNT_FORMAT_MISMATCH'] } });
+  V('N-SC-mint-is-not-a-payment', { title: 'Receipt for a mint (from = zero address)', input: { receipt: resign(R.brlaP, (f) => { f.from = '0x' + '0'.repeat(40); }) }, context: ctxS(FX.brlaP, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['PAYMENT_NOT_A_TRANSFER'] } });
+  const rawSign = (canonical, key = KS) => { const id = sha256hex(canonical); const m = `FRACTALAI-stablecoin-receipt-v1\n${id}`; return { algorithm: 'ml-dsa-65', domain: 'FRACTALAI-stablecoin-receipt-v1', transfer_id: id, transfer_canonical: canonical, signed_message: m, public_key: key.pk, signature: key.sign(m) }; };
+  V('N-SC-issued-before-block', { title: 'issued_at earlier than the block that carries the transfer (raw canonical signed by a buggy signer)', input: { receipt: rawSign(R.brlaP.transfer_canonical.replace(/issued_at=\d+/, `issued_at=${Number(R.brlaP.transfer.block_timestamp) - 1}`)) }, context: ctxS(FX.brlaP, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['CANONICAL_MALFORMED'] } });
+  V('N-SC-extra-field-in-canonical', { title: 'Canonical with an extra line (memo=…) appended and signed', input: { receipt: rawSign(R.brlaP.transfer_canonical + '\nmemo=x') }, context: ctxS(FX.brlaP, P137), expect: { valid: false, levels: LS(false, false, false, null), codes: ['CANONICAL_MALFORMED'] } });
+
+  // ── trust (key use / directory) ──
+  V('N-SC-x402-key-cannot-sign-payments', { title: 'Same facts signed by an active key whose use is x402-receipt', input: { receipt: resign(R.brlaP, () => {}, KX) }, context: ctxS(FX.brlaP, P137), expect: { valid: false, levels: LS(true, true, false, true), codes: ['KEY_USE_MISMATCH'], exit_code: 12 } });
+  V('N-SC-reserved-key', { title: 'Signed by a reserved (never activated) stablecoin key', input: { receipt: resign(R.brlaP, () => {}, KSR) }, context: ctxS(FX.brlaP, P137), expect: { valid: false, levels: LS(true, true, false, true), codes: ['KEY_STATUS_RESERVED'] } });
+  V('N-SC-production-directory-has-no-stablecoin-key', { title: 'Real epoch-3 production directory (pinned roots): no key with use stablecoin-receipt is published yet', input: { receipt: R.brlaP }, context: { now: tsOf(FX.brlaP) + 600, directory: REF('fixtures/directory-epoch3.json'), options: { kind: KIND } }, expect: { valid: false, levels: LS(true, true, false, null), trust_basis: 'pinned-root', codes: ['KEY_NOT_LISTED'] } });
+  V('N-SC-signed-time-in-future', { title: 'issued_at a day after verification time', input: { receipt: resign(R.brlaP, (f) => { f.issued_at = String(tsOf(FX.brlaP) + 86400 * 2); }) }, context: { now: tsOf(FX.brlaP) + 600, roots: TRS, directory: DS, options: { kind: KIND } }, expect: { valid: false, levels: LS(true, true, false, null), codes: ['SIGNED_TIME_IN_FUTURE'] } });
+
+  // ── A4: compromised / buggy signer — the chain contradicts the signature ──
+  V('N-SC-compromised-signer-inflates-amount', { title: 'Valid key signs the real tx with amount ×10: authentic and trusted, refused by the chain', input: { receipt: resign(R.copm, (f) => { f.amount += '0'; f.amount_decimal += '0'; }) }, context: ctxS(FX.copm, P137), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_AMOUNT_MISMATCH'], exit_code: 15 } });
+  V('N-SC-compromised-signer-swaps-parties', { title: 'Valid key signs the real tx with from/to swapped', input: { receipt: resign(R.brlaB, (f) => { [f.from, f.to] = [f.to, f.from]; }) }, context: ctxS(FX.brlaB, B8453), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_PARTY_MISMATCH'] } });
+  V('N-SC-compromised-signer-block-time', { title: 'Signed block_timestamp one second later than the header', input: { receipt: resign(R.brlaB, (f) => { f.block_timestamp = String(Number(f.block_timestamp) + 1); }) }, context: ctxS(FX.brlaB, B8453), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_TIME_MISMATCH'] } });
+  V('N-SC-confirmations-overclaimed', { title: 'Signer claims 10,000,000 confirmations', input: { receipt: resign(R.brlaB, (f) => { f.confirmations = '10000000'; }) }, context: ctxS(FX.brlaB, B8453), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_CONFIRMATIONS'] } });
+  const usdc = logAt(FX.mxnbB.transcript, 23);
+  V('N-SC-log-of-another-contract', { title: 'REAL swap tx: receipt says MXNB at log 23, which is a USDC Transfer (another contract)', source: ['real:base:0x9963ad6a…d4c8#23'], input: { receipt: resign(R.mxnbB, (f) => { f.log_index = '23'; f.from = '0x' + usdc.topics[1].slice(26); f.to = '0x' + usdc.topics[2].slice(26); f.amount = BigInt(usdc.data).toString(); f.amount_decimal = formatUnits(BigInt(usdc.data).toString(), 6); }) }, context: ctxS(FX.mxnbB, B8453), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_LOG_WRONG_CONTRACT'] } });
+  V('N-SC-approval-is-not-a-transfer', { title: 'REAL swap tx: log 25 is an MXNB Approval event, not a Transfer', source: ['real:base:0x9963ad6a…d4c8#25'], input: { receipt: resign(R.mxnbB, (f) => { f.log_index = '25'; }) }, context: ctxS(FX.mxnbB, B8453), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_LOG_NOT_TRANSFER'] } });
+  V('N-SC-log-index-absent', { title: 'log_index not present in the transaction', input: { receipt: resign(R.mxnbA, (f) => { f.log_index = '999'; }) }, context: ctxS(FX.mxnbA, A42161), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_LOG_NOT_FOUND'] } });
+  V('N-SC-claimed-finality-not-reported', { title: 'REAL: receipt claims "finalized"; the second RPC (1rpc) does not report the block finalized → fail closed', source: ['real:arbitrum:1rpc finalized tag lags'], input: { receipt: R.mxnbA }, context: ctxS(FX.mxnbA, A42161Q, { policy: { rpcQuorum: 2 } }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_NOT_FINALIZED'] } });
+  V('N-SC-unfinalized-default-policy', { title: 'Receipt claiming only "confirmed", block not finalized on every RPC, default policy requires finality', input: { receipt: mxnbConfirmed }, context: ctxS(FX.mxnbA, A42161Q, { policy: { rpcQuorum: 2 } }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_NOT_FINALIZED'] } });
+
+  // ── A6: chain / RPC says otherwise (reorg, revert, wrong network, disagreement) ──
+  V('N-SC-tx-reverted', { title: 'The transaction reverted (status 0x0): no transfer happened', input: { receipt: R.brlaP }, context: ctxS(FX.brlaP, P137, { transcript: mutT(FX.brlaP, (t) => { rcOf(t).status = '0x0'; }) }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_TX_REVERTED'] } });
+  V('N-SC-tx-not-found', { title: 'The RPC does not know the transaction (dropped / other network)', input: { receipt: R.brlaP }, context: ctxS(FX.brlaP, P137, { transcript: mutT(FX.brlaP, (t) => { t.find((x) => x.method === 'eth_getTransactionReceipt').result = null; }) }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_TX_NOT_FOUND'] } });
+  V('N-SC-wrong-chain-rpc', { title: 'Polygon receipt checked against an RPC that serves Base (real Base eth_chainId)', input: { receipt: R.copm }, context: ctxS(FX.copm, { 'eip155:137': ['replay://base'] }, { transcript: [SCREF('brla-base')] }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_WRONG_CHAIN'] } });
+  const reorgHeader = mutT(FX.mxnbA, (t) => { blkOf(t, 'replay://arb1').result.hash = '0x' + sha256hex('reorg/mxnb').slice(0, 64); });
+  V('N-SC-reorg-block-not-canonical', { title: 'Simulated reorg: the canonical header at block_number has another hash than the receipt\'s block', input: { receipt: R.mxnbA }, context: ctxS(FX.mxnbA, A42161, { transcript: reorgHeader }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_REORGED'] } });
+  const NEWH = '0x' + sha256hex('reorg/new-block').slice(0, 64);
+  const reincl = mutT(FX.mxnbA, (t) => { const rc = rcOf(t, 'replay://arb1'); rc.blockHash = NEWH; for (const l of rc.logs) l.blockHash = NEWH; blkOf(t, 'replay://arb1').result.hash = NEWH; });
+  V('N-SC-reorg-reincluded-same-height', { title: 'Simulated reorg: the tx was re-included at the same height in a different block (signed block_hash no longer canonical)', input: { receipt: R.mxnbA }, context: ctxS(FX.mxnbA, A42161, { transcript: reincl }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_REORGED'] } });
+  const moved = mutT(FX.mxnbA, (t) => { const rc = rcOf(t, 'replay://arb1'); const n = '0x' + (parseInt(rc.blockNumber, 16) + 1).toString(16); rc.blockNumber = n; for (const l of rc.logs) l.blockNumber = n; const b = blkOf(t, 'replay://arb1'); b.params = [n, false]; b.result.number = n; });
+  V('N-SC-reorg-moved-to-next-block', { title: 'Simulated reorg: the tx now lives in block_number + 1', input: { receipt: R.mxnbA }, context: ctxS(FX.mxnbA, A42161, { transcript: moved }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_BLOCK_MISMATCH'] } });
+  V('N-SC-log-removed', { title: 'The Transfer log is flagged removed (reorg in progress)', input: { receipt: R.mxnbA }, context: ctxS(FX.mxnbA, A42161, { transcript: mutT(FX.mxnbA, (t) => { logAt(t, 3, 'replay://arb1').removed = true; }) }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_LOG_REMOVED'] } });
+  V('N-SC-token-symbol-changed-onchain', { title: 'Upgradeable proxy now answers symbol() = "BRLX": live metadata differs from the signed one', input: { receipt: R.brlaP }, context: ctxS(FX.brlaP, P137, { transcript: mutT(FX.brlaP, (t) => { const c = t.find((x) => x.method === 'eth_call' && x.params[0].data === '0x95d89b41'); c.result = '0x' + (32).toString(16).padStart(64, '0') + (4).toString(16).padStart(64, '0') + Buffer.from('BRLX').toString('hex').padEnd(64, '0'); }) }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['PAYMENT_TOKEN_METADATA'] } });
+  const lying = [...FX.copm.transcript.filter((x) => x.url === 'replay://polygon'), ...mutT(FX.copm, (t) => { logAt(t, 2229, 'replay://polygon-1rpc').data = '0x' + (BigInt(logAt(t, 2229, 'replay://polygon-1rpc').data) * 10n).toString(16).padStart(64, '0'); }).filter((x) => x.url === 'replay://polygon-1rpc')];
+  V('N-SC-cross-rpc-disagreement', { title: 'Second RPC reports a different amount for the same log', input: { receipt: R.copm }, context: ctxS(FX.copm, P137Q, { transcript: lying }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['RPC_DISAGREEMENT'] } });
+  V('N-SC-quorum-not-met', { title: 'Policy requires 2 RPCs, one configured', input: { receipt: R.copm }, context: ctxS(FX.copm, P137, { policy: { rpcQuorum: 2 } }), expect: { valid: false, levels: LS(true, true, true, false), codes: ['RPC_QUORUM'] } });
+}
+
+// ═══════════════ agent-commerce-receipt (spec §13): protocol-neutral payment ↔ delivery binding ═══════════════
+// Synthetic TEST PKI only (production epoch 3 has no commerce-receipt key — asserted below). Bodies follow the
+// adapter profiles (ap2.fulfillment/1, erc8004.validation/1, mcp.tool-result/1) but the kernel only checks shape,
+// signature, key use/lifecycle and time: the profile semantics are re-derived by the adapters, never here.
+{
+  const KC = S.mlKey('commerce-issuer'), KX = S.mlKey('x402-only'), KSC = S.mlKey('stablecoin-issuer'), KCR = S.mlKey('commerce-reserved');
+  const DC = S.directory([
+    { key: KC, use: 'commerce-receipt', status: 'active', not_before: 1790000000 },
+    { key: KX, use: 'x402-receipt', status: 'active', not_before: 1790000000 },
+    { key: KSC, use: 'stablecoin-receipt', status: 'active', not_before: 1790000000 },
+    { key: KCR, use: 'commerce-receipt', status: 'reserved' },
+  ], GOV, { epoch: 3, prevRoot: sha256hex('commerce-epoch-2') });
+  const TRC = S.testRoots(GOV, DC);
+  const KIND = 'agent-commerce-receipt';
+  const ctxC = (o = {}) => ({ roots: TRC, directory: DC, options: { kind: KIND, ...(o.options || {}) }, ...(o.ctx || {}) });
+  const body = S.commerceBody;
+  const ap2 = S.commerceReceipt(KC);
+  const erc = S.commerceReceipt(KC, body({
+    protocol: 'erc8004', profile: 'erc8004.validation/1',
+    payment: { scheme: 'x402-exact', network: 'eip155:8453', tx_hash: '0x' + '42'.repeat(32) },
+    delivery: { sha256: sha256hex('erc8004 work output') },
+    bindings: { chain_id: 'eip155:31337', validation_registry: '0x' + '8004'.repeat(10), agent_id: '1', request_hash: '0x' + sha256hex('request').slice(0, 64), validator: '0x' + 'f0'.repeat(20) },
+  }));
+  const mcp = S.commerceReceipt(KC, body({ protocol: 'mcp', profile: 'mcp.tool-result/1', payment: { method: 'none' }, delivery: { sha256: sha256hex('{}') }, bindings: {} }));
+  const LC = (i, a, t, o = null) => ({ ...L(i, a, t), onchain: o });
+  const BADI = { valid: false, levels: FAIL_I, codes: ['COMMERCE_MALFORMED'], exit_code: 10 };
+  const raw = (b) => S.commerceReceiptRaw(KC, b);
+
+  // ── positives ──
+  V('P40-commerce-ap2-fulfillment', { title: 'agent-commerce-receipt, profile ap2.fulfillment/1, active commerce-receipt test key, test roots (override)', input: { receipt: ap2 }, context: ctxC(), expect: { valid: true, levels: OK, trust_basis: 'override', exit_code: 0 } });
+  V('P41-commerce-erc8004-validation-trusted-keys', { title: 'profile erc8004.validation/1, pinned key set (no directory)', input: { receipt: erc }, context: { options: { kind: KIND, trusted_keys: [KC.pk] } }, expect: { valid: true, levels: OK, trust_basis: 'override' } });
+  V('P42-commerce-mcp-minimal', { title: 'profile mcp.tool-result/1: one payment entry, empty bindings, delivery with sha256 only', input: { receipt: mcp }, context: ctxC(), expect: { valid: true, levels: OK } });
+  const bare = { commerce: ap2.commerce, public_key: ap2.public_key, signature: ap2.signature };
+  V('P43-commerce-without-unsigned-copies', { title: 'Only commerce + public_key + signature (all unsigned copies optional)', input: { receipt: bare }, context: ctxC(), expect: { valid: true, levels: OK } });
+  V('P44-commerce-expected-id-and-kinds', { title: 'Policy allows several kinds; shape selects agent-commerce-receipt; expected id matches', input: { receipt: ap2 }, context: ctxC({ options: { kind: undefined, kinds: ['x402-seal', KIND], expected_id: ap2.commerce_id } }), expect: { valid: true, levels: OK } });
+  const cIds = S.idsOf(ap2.signature, ap2.signed_message, ap2.public_key);
+  V('P45-commerce-anchored-arbitrum', { title: 'Commerce receipt anchored (synthetic Arbitrum One node with the real runtime code): observedAt = signed issued_at', input: { receipt: ap2 }, context: ctxC({ options: { check_anchors: true, anchors: [synAnchor(600000100)], rpc: { 'eip155:42161': ['replay://synthetic-arb1'] }, policy: { require: ['integrity', 'authentic', 'trusted', 'time_anchored', 'finalized'] } }, ctx: { rpc_transcript: synT({ ids: cIds, observedAt: 1791399000, blockNumber: 600000100, blockTime: 1791399060 }) } }), expect: { valid: true, levels: L(true, true, true, true, true) } });
+
+  // ── A1: document forger ──
+  const altered = clone(ap2); altered.commerce.payment.payment_id = 'pay_attacker';
+  V('N-AC-payment-altered-id-kept', { title: 'payment_id changed in the body, unsigned commerce_id kept', input: { receipt: altered }, context: ctxC(), expect: { valid: false, levels: FAIL_I, codes: ['RECEIPT_ID_MISMATCH'] } });
+  const alteredBare = { commerce: altered.commerce, public_key: ap2.public_key, signature: ap2.signature };
+  V('N-AC-payment-altered-no-copies', { title: 'payment_id changed, no unsigned copies: the genuine signature does not cover the new body', input: { receipt: alteredBare }, context: ctxC(), expect: { valid: false, levels: FAIL_A, codes: ['SIGNATURE_INVALID'], exit_code: 11 } });
+  const swapped = clone(bare); swapped.commerce = { ...swapped.commerce, delivery: { sha256: sha256hex('other content') } };
+  V('N-AC-delivery-swapped', { title: 'Delivered-content hash replaced (claims another content was paid for)', input: { receipt: swapped }, context: ctxC(), expect: { valid: false, levels: FAIL_A, codes: ['SIGNATURE_INVALID'] } });
+  V('N-AC-extra-body-key', { title: 'Body carries an extra key (note) — closed key set', input: { receipt: raw({ ...body(), note: 'x' }) }, context: ctxC(), expect: BADI });
+  const { delivery: _d, ...noDelivery } = body();
+  V('N-AC-missing-delivery', { title: 'Body without delivery (a commerce receipt always binds a delivered content hash)', input: { receipt: raw(noDelivery) }, context: ctxC(), expect: BADI });
+  V('N-AC-delivery-sha-uppercase', { title: 'delivery.sha256 in uppercase hex', input: { receipt: raw(body({ delivery: { sha256: sha256hex('x').toUpperCase() } })) }, context: ctxC(), expect: BADI });
+  V('N-AC-delivery-unknown-key', { title: 'delivery carries an unknown key (url)', input: { receipt: raw(body({ delivery: { sha256: sha256hex('x'), url: 'https://e.x' } })) }, context: ctxC(), expect: BADI });
+  V('N-AC-non-ascii-value', { title: 'payment value with a non-ASCII character (parser/normalisation differential guard)', source: ['spec:§13.2 ASCII-only (A8)'], input: { receipt: raw(body({ payment: { payment_id: 'pagó_1' } })) }, context: ctxC(), expect: BADI });
+  V('N-AC-numeric-payment-value', { title: 'payment.amount as a JSON number (values are strings only)', input: { receipt: raw(body({ payment: { amount: 1999 } })) }, context: ctxC(), expect: BADI });
+  V('N-AC-uppercase-entry-key', { title: 'bindings key with uppercase letters', input: { receipt: raw(body({ bindings: { RequestHash: 'abc' } })) }, context: ctxC(), expect: BADI });
+  V('N-AC-empty-entry-value', { title: 'payment value is the empty string', input: { receipt: raw(body({ payment: { payment_id: '' } })) }, context: ctxC(), expect: BADI });
+  V('N-AC-issued-at-string', { title: 'issued_at as a string', input: { receipt: raw(body({ issued_at: '1791399000' })) }, context: ctxC(), expect: BADI });
+  V('N-AC-issued-at-fraction', { title: 'issued_at with a fraction (1791399000.5)', source: ['spec:§4.3 safe integers'], input: { receipt: raw(body({ issued_at: 1791399000.5 })) }, context: ctxC(), expect: BADI });
+  V('N-AC-issued-at-zero', { title: 'issued_at = 0', input: { receipt: raw(body({ issued_at: 0 })) }, context: ctxC(), expect: BADI });
+  V('N-AC-wrong-version', { title: 'v = fractalai.agent-commerce/2 (unknown body version)', input: { receipt: raw(body({ v: 'fractalai.agent-commerce/2' })) }, context: ctxC(), expect: BADI });
+  V('N-AC-protocol-uppercase', { title: 'protocol = "AP2"', input: { receipt: raw(body({ protocol: 'AP2' })) }, context: ctxC(), expect: BADI });
+  V('N-AC-profile-without-version', { title: 'profile without /<version>', input: { receipt: raw(body({ profile: 'ap2.fulfillment' })) }, context: ctxC(), expect: BADI });
+  const many = Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`k${i}`, 'v']));
+  V('N-AC-17-bindings', { title: 'bindings with 17 entries (max 16)', input: { receipt: raw(body({ bindings: many })) }, context: ctxC(), expect: BADI });
+  const big = (p) => Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`${p}${i}`, 'x'.repeat(512)]));
+  V('N-AC-body-over-8192-bytes', { title: '16 payment + 16 bindings entries of 512 characters: JCS(commerce) > 8192 bytes', input: { receipt: raw(body({ payment: big('p'), bindings: big('b') })) }, context: ctxC(), expect: BADI });
+  V('N-AC-body-not-object', { title: 'commerce is an array', input: { receipt: { commerce: [], public_key: ap2.public_key, signature: ap2.signature } }, context: ctxC(), expect: BADI });
+  V('N-AC-domain-relabelled', { title: 'Unsigned domain relabelled as the stablecoin domain', input: { receipt: { ...ap2, domain: 'FRACTALAI-stablecoin-receipt-v1' } }, context: ctxC(), expect: { valid: false, levels: FAIL_I, codes: ['DOMAIN_MISMATCH'] } });
+  V('N-AC-signed-message-mismatch', { title: 'Unsigned signed_message names another id', input: { receipt: { ...ap2, signed_message: `FRACTALAI-agent-commerce-receipt-v1\n${'0'.repeat(64)}` } }, context: ctxC(), expect: { valid: false, levels: FAIL_I, codes: ['SIGNED_MESSAGE_MISMATCH'] } });
+  V('N-AC-top-level-issued-at-mismatch', { title: 'Top-level issued_at (what a dashboard reads) differs from the signed one', input: { receipt: { ...ap2, issued_at: ap2.issued_at + 3600 } }, context: ctxC(), expect: { valid: false, levels: FAIL_I, codes: ['UNSIGNED_FIELD_MISMATCH'] } });
+  V('N-AC-kind-ambiguous-seal-body', { title: 'Commerce receipt also carrying an x402-seal `body`', input: { receipt: { ...ap2, body: S.sealBody() } }, context: ctxC(), expect: { valid: false, levels: FAIL_I, codes: ['KIND_AMBIGUOUS'] } });
+  V('N-AC-profile-label-other-kind', { title: 'Top-level profile label "x402-served" on a commerce receipt', source: ['redteam-python:F1'], input: { receipt: { ...ap2, profile: 'x402-served' } }, context: ctxC(), expect: { valid: false, levels: FAIL_I, codes: ['KIND_AMBIGUOUS'] } });
+  V('N-AC-kind-not-allowed', { title: 'Policy allows only x402-seal and midas-alert; document is a commerce receipt', input: { receipt: ap2 }, context: ctxC({ options: { kind: undefined, kinds: ['x402-seal', 'midas-alert'] } }), expect: { valid: false, levels: FAIL_I, codes: ['KIND_NOT_ALLOWED'] } });
+  V('N-AC-expected-id-other-genuine', { title: 'A genuine commerce receipt served for another requested id (mirror substitution, A2)', input: { receipt: mcp }, context: ctxC({ options: { expected_id: ap2.commerce_id } }), expect: { valid: false, levels: FAIL_I, codes: ['EXPECTED_ID_MISMATCH'] } });
+
+  // ── domain separation / key use ──
+  const asServed = S.servedProof(KC, 'agent-commerce', ap2.commerce_id);
+  asServed.signature = ap2.signature;
+  V('N-AC-signature-replayed-as-served-proof', { title: 'Commerce signature re-wrapped as a served-proof over the same id (domain separation)', input: { receipt: asServed }, context: { roots: TRC, directory: DC, options: { kind: 'served-proof' } }, expect: { valid: false, levels: FAIL_A, codes: ['SIGNATURE_INVALID'] } });
+  const crossDomain = S.commerceReceipt(KC, body(), { domain: 'FRACTALAI-x402-served-v1\nx402-witness' });
+  V('N-AC-signed-under-seal-domain', { title: 'Commerce body signed under the x402-witness domain, presented as a commerce receipt', input: { receipt: crossDomain }, context: ctxC(), expect: { valid: false, levels: FAIL_A, codes: ['SIGNATURE_INVALID'] } });
+  V('N-AC-x402-key-cannot-sign-commerce', { title: 'Active x402-receipt key signs a commerce receipt', input: { receipt: S.commerceReceipt(KX) }, context: ctxC(), expect: { valid: false, levels: FAIL_T, codes: ['KEY_USE_MISMATCH'], exit_code: 12 } });
+  V('N-AC-stablecoin-key-cannot-sign-commerce', { title: 'Active stablecoin-receipt key signs a commerce receipt', input: { receipt: S.commerceReceipt(KSC) }, context: ctxC(), expect: { valid: false, levels: FAIL_T, codes: ['KEY_USE_MISMATCH'] } });
+  V('N-AC-commerce-key-cannot-sign-x402-seal', { title: 'Active commerce-receipt key signs an x402 seal', input: { receipt: S.sealReceipt(KC, S.sealBody()) }, context: { roots: TRC, directory: DC, options: { kind: 'x402-seal' } }, expect: { valid: false, levels: FAIL_T, codes: ['KEY_USE_MISMATCH'] } });
+  V('N-AC-reserved-commerce-key', { title: 'Reserved (never activated) commerce key', input: { receipt: S.commerceReceipt(KCR) }, context: ctxC(), expect: { valid: false, levels: FAIL_T, codes: ['KEY_STATUS_RESERVED'] } });
+  V('N-AC-key-not-yet-valid', { title: 'Signed issued_at before the key not_before', input: { receipt: S.commerceReceipt(KC, body({ issued_at: 1789999999 })) }, context: ctxC(), expect: { valid: false, levels: FAIL_T, codes: ['KEY_NOT_YET_VALID'] } });
+  V('N-AC-signed-time-in-future', { title: 'issued_at a day after verification time', input: { receipt: S.commerceReceipt(KC, body({ issued_at: NOW + 86400 })) }, context: ctxC(), expect: { valid: false, levels: FAIL_T, codes: ['SIGNED_TIME_IN_FUTURE'] } });
+  V('N-AC-production-directory-has-no-commerce-key', { title: 'Real epoch-3 production directory (pinned roots): no key with use commerce-receipt is published', input: { receipt: ap2 }, context: { directory: REF('fixtures/directory-epoch3.json'), options: { kind: KIND } }, expect: { valid: false, levels: FAIL_T, trust_basis: 'pinned-root', codes: ['KEY_NOT_LISTED'] } });
+  V('N-AC-onchain-not-applicable', { title: 'Policy requires the onchain level: commerce receipts carry no on-chain facts the kernel recomputes', input: { receipt: ap2 }, context: ctxC({ options: { check_onchain: true, policy: { require: ['integrity', 'authentic', 'trusted', 'onchain'] } } }), expect: { valid: false, levels: LC(true, true, true, false), codes: ['ONCHAIN_NOT_APPLICABLE'], exit_code: 15 } });
+  V('N-AC-anchor-observed-at-not-issued-at', { title: 'Anchor event observedAt differs from the signed issued_at', input: { receipt: ap2 }, context: ctxC({ options: { check_anchors: true, anchors: [synAnchor(600000101)], rpc: { 'eip155:42161': ['replay://synthetic-arb1'] }, policy: { require: ['integrity', 'authentic', 'trusted', 'time_anchored'] } }, ctx: { rpc_transcript: synT({ ids: cIds, observedAt: 1791399001, blockNumber: 600000101, blockTime: 1791399060 }) } }), expect: { valid: false, levels: L(true, true, true, false, false), codes: ['ANCHOR_OBSERVED_AT_MISMATCH'] } });
+}
 
 // ── manifest: id → sha256 of the vector file (the runner refuses a corpus that does not match) ──
 const files = readdirSync(OUT).filter((f) => f.endsWith('.json')).sort();
