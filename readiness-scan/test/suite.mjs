@@ -236,6 +236,18 @@ check('an output path outside the workspace is refused', () => {
   assert(!fs.existsSync(path.join(WORK, '..', '..', 'escaped.json')), 'a file was written outside the workspace');
 });
 
+check('the workspace confinement holds when GITHUB_WORKSPACE is set', () => {
+  // El confinamiento se mide desde el directorio de trabajo, y cuando ese directorio está dentro
+  // del espacio de trabajo de Actions se usa el espacio entero. Imponer GITHUB_WORKSPACE a ciegas
+  // rompía toda escritura legítima de cualquier proceso que corriera fuera de él, incluida esta
+  // batería; no imponerlo nunca permitiría escapar del checkout. Las dos mitades se comprueban.
+  const d = fixture('ws', { 'a.js': 'const k = "RSA-2048";\n' });
+  const inside = run([`--path=${d}`, '--output=inside.json'], { GITHUB_WORKSPACE: WORK });
+  assert(inside.code === 0, `a legitimate write inside the workspace was refused (exit ${inside.code})`);
+  const outside = run([`--path=${d}`, '--output=../../escaped.json'], { GITHUB_WORKSPACE: WORK });
+  assert(outside.code === 2, `an escape from the workspace was accepted (exit ${outside.code})`);
+});
+
 check('an output path that is a symlink is refused', () => {
   const d = fixture('sec4', { 'a.js': 'RSA\n' });
   const target = path.join(WORK, 'precious.txt');

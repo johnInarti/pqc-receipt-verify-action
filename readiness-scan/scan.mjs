@@ -78,10 +78,18 @@ function safeOutPath(raw) {
     console.error('  output: no puede contener saltos de línea ni bytes nulos.');
     process.exit(2);
   }
-  const base = process.env.GITHUB_WORKSPACE ? path.resolve(process.env.GITHUB_WORKSPACE) : process.cwd();
-  const abs = path.resolve(base, raw);
+  // La base del confinamiento es el directorio de trabajo. Cuando ese directorio está DENTRO del
+  // espacio de trabajo de Actions se usa el espacio completo, para que `output: ../informes/x.json`
+  // siga siendo legítimo dentro del checkout. Lo que no se puede hacer es imponer GITHUB_WORKSPACE
+  // a ciegas: un proceso que corre fuera de él (la propia batería de pruebas, o cualquier paso con
+  // working-directory propio) vería rechazada toda escritura legítima.
+  const cwd = process.cwd();
+  const ws = process.env.GITHUB_WORKSPACE ? path.resolve(process.env.GITHUB_WORKSPACE) : null;
+  const inWorkspace = ws && (cwd === ws || cwd.startsWith(ws + path.sep));
+  const base = inWorkspace ? ws : cwd;
+  const abs = path.resolve(cwd, raw);
   if (abs !== base && !abs.startsWith(base + path.sep)) {
-    console.error(`  output: debe quedar dentro del espacio de trabajo (${base}). Recibido: ${abs}`);
+    console.error(`  output: must stay inside ${base}. Received: ${abs}`);
     process.exit(2);
   }
   try {
