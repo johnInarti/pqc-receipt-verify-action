@@ -27,13 +27,57 @@ import crypto from 'node:crypto';
 
 const arg = (n, d) => {
   const f = process.argv.find((a) => a.startsWith(`--${n}=`));
-  return f ? f.slice(n.length + 3) : d;
+  const v = f ? f.slice(n.length + 3) : undefined;
+  // Un `--output=` presente pero vacío NO debe ganarle al valor por defecto: antes devolvía la
+  // cadena vacía y el pase moría con ENOENT después de haber hecho todo el trabajo.
+  return v === undefined || v === '' ? d : v;
 };
-const ROOT = path.resolve(arg('path', '.'));
-const OUT = arg('output', 'cbom.json');
-const FAIL = arg('fail-on-findings', 'false') === 'true';
-const SEAL = arg('seal', 'false') === 'true';
+/** La acción pasa las entradas por el entorno. argv queda para uso local desde la terminal. */
+const input = (envName, argName, d) => {
+  const e = process.env[envName];
+  return e === undefined || e === '' ? arg(argName, d) : e;
+};
+
+const ROOT = path.resolve(input('PQC_PATH', 'path', '.'));
+const OUT_RAW = input('PQC_OUTPUT', 'output', 'cbom.json');
+const FAIL = input('PQC_FAIL_ON_FINDINGS', 'fail-on-findings', 'false') === 'true';
+const SEAL = input('PQC_SEAL', 'seal', 'false') === 'true';
 const API = process.env.FRACTALAI_BASE_URL || 'https://fractalai.net.co';
+
+/**
+ * La ruta de salida es la única que escribimos, así que se valida como tal. Sin esto era una
+ * primitiva de escritura arbitraria: `../..` salía del espacio de trabajo, una ruta absoluta
+ * pisaba cualquier archivo, un enlace simbólico machacaba su destino, y un salto de línea dentro
+ * del valor inyectaba variables falsas en $GITHUB_OUTPUT.
+ */
+function safeOutPath(raw) {
+  if (/[\r\n\0]/.test(raw)) {
+    console.error('  output: no puede contener saltos de línea ni bytes nulos.');
+    process.exit(2);
+  }
+  const base = process.env.GITHUB_WORKSPACE ? path.resolve(process.env.GITHUB_WORKSPACE) : process.cwd();
+  const abs = path.resolve(base, raw);
+  if (abs !== base && !abs.startsWith(base + path.sep)) {
+    console.error(`  output: debe quedar dentro del espacio de trabajo (${base}). Recibido: ${abs}`);
+    process.exit(2);
+  }
+  try {
+    // lstat, no stat: lo que importa es si la ENTRADA es un enlace, no a dónde apunta.
+    if (fs.lstatSync(abs).isSymbolicLink()) {
+      console.error('  output: apunta a un enlace simbólico; escribir ahí pisaría su destino.');
+      process.exit(2);
+    }
+  } catch { /* no existe todavía: es el caso normal */ }
+  return abs;
+}
+const OUT = safeOutPath(OUT_RAW);
+
+/**
+ * Todo lo que venga del repositorio escaneado (nombres de archivo, contenido de líneas) es dato
+ * ajeno y puede traer escapes ANSI o retornos de carro. Impreso en crudo en un log de CI, eso
+ * permite falsificar colores, mover el cursor y tapar líneas reales del propio pase.
+ */
+const clean = (s) => String(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, '?');
 
 /**
  * Quantum-vulnerable primitives per NIST IR 8547. `why` is what the reader actually needs:
@@ -186,7 +230,7 @@ const grn = (s) => `\x1b[32m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 console.log('');
 console.log('  PQC Readiness Scan — quantum-vulnerable cryptography in this repository');
-console.log(dim(`  ${files.length} files scanned · CycloneDX CBOM written to ${OUT}`));
+console.log(dim(`  ${files.length} files scanned · CycloneDX CBOM written to ${clean(OUT)}`));
 console.log('');
 if (found.size === 0) {
   console.log(grn('  No quantum-vulnerable primitives matched.'));
@@ -198,8 +242,8 @@ if (found.size === 0) {
   for (const [, e] of found) {
     console.log(`  ${red('✗')} ${e.name} — ${e.hits.length} occurrence(s)`);
     console.log(dim(`      ${e.why}`));
-    for (const h of e.hits.slice(0, 3)) console.log(dim(`      ${h.file}:${h.line}`));
-    if (e.hits.length > 3) console.log(dim(`      … and ${e.hits.length - 3} more (full list in ${OUT})`));
+    for (const h of e.hits.slice(0, 3)) console.log(dim(`      ${clean(h.file)}:${h.line}`));
+    if (e.hits.length > 3) console.log(dim(`      … and ${e.hits.length - 3} more (full list in ${clean(OUT)})`));
     console.log('');
   }
 }
@@ -233,7 +277,13 @@ if (SEAL) {
 }
 
 const gh = process.env.GITHUB_OUTPUT;
-if (gh) fs.appendFileSync(gh, `findings=${totalHits}\ncbom=${OUT}\n`);
+if (gh) {
+  // `findings` se fuerza a número y `cbom` va en el formato de delimitador aleatorio que exige
+  // GitHub para valores multilínea. Concatenar `nombre=valor` a pelo deja que el valor declare
+  // variables adicionales que un paso posterior se creería.
+  const delim = 'PQC_EOF_' + crypto.randomBytes(16).toString('hex');
+  fs.appendFileSync(gh, `findings=${Number(totalHits) || 0}\ncbom<<${delim}\n${OUT}\n${delim}\n`);
+}
 const sum = process.env.GITHUB_STEP_SUMMARY;
 if (sum) {
   fs.appendFileSync(sum, [

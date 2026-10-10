@@ -128,6 +128,31 @@ served over TLS and is **not yet anchored on-chain**. Verifying a seal therefore
 trusting that TLS endpoint for the key, and the cryptography for everything after. We say
 so here rather than let you discover it in an audit.
 
+## Security posture
+
+You are being asked to run someone else's code in your CI, so here is exactly what it does
+and what was done to make it safe:
+
+- **Inputs never touch a shell.** Every input reaches the scanner through the environment.
+  A composite action that writes `--path="${{ inputs.path }}"` inside a `run:` block lets
+  the runner paste raw input text into the script before bash parses it, which hands
+  command execution to anyone who can influence that input (a pull-request title, an issue
+  body, a dispatch field). This action does not do that, and a CI test asserts it on every
+  push by feeding it a hostile input and failing if anything executes.
+- **The output path is confined to your workspace.** Traversal, absolute paths and
+  symlinks are refused, so the action cannot overwrite a file outside the checkout.
+- **Step outputs cannot be forged.** The count is written as a number and the path with a
+  random heredoc delimiter, so no input value can inject extra step outputs that a later
+  step would trust.
+- **Repository content never reaches your log unescaped.** Control characters and ANSI
+  escapes coming from scanned filenames are stripped, so a hostile repo cannot spoof your
+  CI log.
+- **No network calls at all unless you set `seal: true`.** No token is read, no permission
+  is requested, nothing is uploaded.
+
+Found something we missed? Open an issue. Security reports are welcome and credited.
+
+
 ## Who made this
 
 [FractalAI S.A.S.](https://fractalai.net.co) (Colombia) runs a layer-1 blockchain whose

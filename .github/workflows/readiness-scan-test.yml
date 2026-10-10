@@ -13,10 +13,10 @@ jobs:
 
       - name: Caso 1 — código vulnerable de verdad (debe encontrar RSA y ECDSA)
         run: |
-          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=/tmp/a.json
+          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=out-a.json
           python3 - <<'PY'
           import json
-          c=json.load(open('/tmp/a.json'))
+          c=json.load(open('out-a.json'))
           names={x['name'] for x in c['components']}
           assert any('RSA' in n for n in names), names
           assert any('ECDSA' in n for n in names), names
@@ -25,10 +25,10 @@ jobs:
 
       - name: Caso 2 — código post-cuántico (NO debe marcar ML-DSA como vulnerable)
         run: |
-          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/resistant --output=/tmp/b.json
+          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/resistant --output=out-b.json
           python3 - <<'PY'
           import json
-          c=json.load(open('/tmp/b.json'))
+          c=json.load(open('out-b.json'))
           vuln=[x['name'] for x in c['components']
                 if any(p['name']=='fractalai:quantum_vulnerable' and p['value']=='true'
                        for p in x.get('properties',[]))]
@@ -40,7 +40,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
-          c=json.load(open('/tmp/a.json'))
+          c=json.load(open('out-a.json'))
           assert c['bomFormat']=='CycloneDX' and c['specVersion']=='1.6'
           assert c['serialNumber'].startswith('urn:uuid:')
           for x in c['components']:
@@ -51,7 +51,7 @@ jobs:
 
       - name: Caso 4 — fail-on-findings corta el pase
         run: |
-          if node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=/tmp/c.json --fail-on-findings=true; then
+          if node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=out-c.json --fail-on-findings=true; then
             echo "ERROR: debió salir con código != 0"; exit 1
           fi
           echo "OK: fail-on-findings funciona"

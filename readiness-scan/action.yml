@@ -10,7 +10,7 @@ inputs:
     required: false
     default: '.'
   output:
-    description: 'Where to write the CycloneDX CBOM.'
+    description: 'Where to write the CycloneDX CBOM. Must stay inside the workspace.'
     required: false
     default: 'cbom.json'
   fail-on-findings:
@@ -31,11 +31,18 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # Every input reaches the scanner through the ENVIRONMENT, never interpolated into this
+    # shell script. That is not style: `run: node x --path="${{ inputs.path }}"` lets the
+    # runner paste the raw input text into the script BEFORE bash parses it, so any workflow
+    # that wires an input from a pull-request title, an issue body or a dispatch field hands
+    # command execution to whoever wrote that text, with the job's secrets in scope. Values
+    # passed via `env:` are never re-parsed by bash, so the same payload stays inert data.
     - id: scan
       shell: bash
-      run: |
-        node "${{ github.action_path }}/scan.mjs" \
-          --path="${{ inputs.path }}" \
-          --output="${{ inputs.output }}" \
-          --fail-on-findings="${{ inputs.fail-on-findings }}" \
-          --seal="${{ inputs.seal }}"
+      env:
+        PQC_ACTION_PATH: ${{ github.action_path }}
+        PQC_PATH: ${{ inputs.path }}
+        PQC_OUTPUT: ${{ inputs.output }}
+        PQC_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        PQC_SEAL: ${{ inputs.seal }}
+      run: node "$PQC_ACTION_PATH/scan.mjs"

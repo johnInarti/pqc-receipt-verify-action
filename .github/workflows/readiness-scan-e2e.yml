@@ -87,6 +87,45 @@ jobs:
           test "$OUTCOME" = "failure" || { echo "::error::fail-on-findings no cortó el pase (outcome=$OUTCOME)"; exit 1; }
           echo "la puerta de corte funciona"
 
+      # La prueba del agujero crítico que tuvo esta acción: las entradas se interpolaban dentro del
+      # shell del composite, así que un repo que cableara `path` desde el título de un pull request
+      # entregaba ejecución de comandos en su propio runner. Ahora viajan por el entorno. Esto lo
+      # vigila para siempre: si alguien vuelve a interpolar, el archivo aparece y el pase falla.
+      - name: 'Seguridad: una entrada hostil es dato, no comando'
+        id: inject
+        continue-on-error: true
+        uses: ./readiness-scan
+        with:
+          path: '$(touch PWNED_RCE; echo hola)'
+          output: cbom-inject.json
+
+      - name: 'Seguridad: nada se ejecutó'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e PWNED_RCE ]; then
+            echo "::error::INYECCION DE COMANDOS: la entrada se ejecutó en el runner"; exit 1
+          fi
+          echo "la entrada hostil se trató como una ruta literal; no se ejecutó nada"
+
+      # Y que no se pueda escribir fuera del espacio de trabajo.
+      - name: 'Seguridad: la salida no escapa del espacio de trabajo'
+        id: escape
+        continue-on-error: true
+        uses: ./readiness-scan
+        with:
+          path: readiness-scan/test/fixtures/vulnerable
+          output: '../../../escaped.json'
+
+      - name: 'Seguridad: el escape fue rechazado'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.escape.outcome }}
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = "failure" || { echo "::error::una ruta de salida fuera del workspace fue aceptada"; exit 1; }
+          echo "la ruta fuera del espacio de trabajo fue rechazada"
+
       # Un repositorio grande y real, para medir que escala.
       - name: 'Escala: el repo entero, con tiempo medido'
         shell: bash
