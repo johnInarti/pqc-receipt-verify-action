@@ -1,57 +1,78 @@
 name: readiness-scan self-test
 
-# La acción se prueba contra sí misma en cada push: tres casos que cubren los tres
-# resultados posibles. Si alguna vez un cambio volviera a marcar ML-DSA como vulnerable,
-# este pase falla antes de que lo vea un usuario.
-on: [push, pull_request]
+# La batería de regresión del escáner, en los tres sistemas operativos que ofrece GitHub.
+#
+# Cada caso de readiness-scan/test/suite.mjs existe porque un asedio adversarial rompió de verdad
+# esta herramienta: ejecución de comandos en el runner de quien la adopte, salidas de paso
+# falsificables, escritura fuera del espacio de trabajo, un 61% de la criptografía real sin
+# detectar, ML-DSA reportado como vulnerable, y barridos truncados que se imprimían como pases
+# limpios. Las pruebas son lo único que impide que vuelvan.
+#
+# Está escrita en Node y no en Python a propósito: windows-latest no trae python3.
+
+on:
+  push:
+    branches: [main]
+    paths: ['readiness-scan/**', '.github/workflows/readiness-scan-test.yml']
+  pull_request:
+    paths: ['readiness-scan/**', '.github/workflows/readiness-scan-test.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - run: node --version
+      - name: Batería de regresión
+        run: node readiness-scan/test/suite.mjs
 
-      - name: Caso 1 — código vulnerable de verdad (debe encontrar RSA y ECDSA)
+  # El escáner afirma emitir «un CBOM de CycloneDX 1.6». Esa frase se comprueba contra el esquema
+  # oficial publicado, no de palabra: el archivo lo van a ingerir herramientas de SBOM y auditores.
+  conformance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generar tres CBOM distintos
         run: |
-          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=out-a.json
+          set -euo pipefail
+          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=cbom-vuln.json
+          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/resistant  --output=cbom-clean.json
+          node readiness-scan/scan.mjs --path=.                                        --output=cbom-self.json
+
+      - name: Validar contra el esquema oficial de CycloneDX 1.6
+        run: |
+          set -euo pipefail
+          curl -sSfL -o bom-1.6.schema.json https://raw.githubusercontent.com/CycloneDX/specification/master/schema/bom-1.6.schema.json
+          curl -sSfL -o spdx.schema.json     https://raw.githubusercontent.com/CycloneDX/specification/master/schema/spdx.schema.json
+          curl -sSfL -o jsf-0.82.schema.json https://raw.githubusercontent.com/CycloneDX/specification/master/schema/jsf-0.82.schema.json
+          python3 -m pip install --quiet jsonschema rfc3339-validator
           python3 - <<'PY'
-          import json
-          c=json.load(open('out-a.json'))
-          names={x['name'] for x in c['components']}
-          assert any('RSA' in n for n in names), names
-          assert any('ECDSA' in n for n in names), names
-          print('OK: encuentra lo vulnerable')
+          import json, sys, jsonschema
+          schema = json.load(open('bom-1.6.schema.json'))
+          # El comprobador de formatos NO trae date-time por defecto: sin rfc3339-validator el
+          # formato del timestamp se omite en silencio y la validación pasa sin haber validado eso.
+          fc = jsonschema.FormatChecker()
+          assert 'date-time' in fc.checkers, 'date-time no registrado: la validación seria incompleta'
+          V = jsonschema.Draft7Validator(schema, format_checker=fc)
+          bad = False
+          for f in ('cbom-vuln.json', 'cbom-clean.json', 'cbom-self.json'):
+              errs = sorted(V.iter_errors(json.load(open(f))), key=lambda e: list(e.path))
+              if errs:
+                  bad = True
+                  print(f'::error::{f} no valida contra CycloneDX 1.6 ({len(errs)} error(es))')
+                  for e in errs[:8]:
+                      print('   ', list(e.path), e.message[:200])
+              else:
+                  print(f'{f}: valida contra CycloneDX 1.6')
+          sys.exit(1 if bad else 0)
           PY
-
-      - name: Caso 2 — código post-cuántico (NO debe marcar ML-DSA como vulnerable)
-        run: |
-          node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/resistant --output=out-b.json
-          python3 - <<'PY'
-          import json
-          c=json.load(open('out-b.json'))
-          vuln=[x['name'] for x in c['components']
-                if any(p['name']=='fractalai:quantum_vulnerable' and p['value']=='true'
-                       for p in x.get('properties',[]))]
-          assert vuln==[], f'falso positivo: {vuln}'
-          print('OK: no hay falsos positivos sobre ML-DSA/ML-KEM/SLH-DSA')
-          PY
-
-      - name: Caso 3 — el CBOM es CycloneDX 1.6 válido
-        run: |
-          python3 - <<'PY'
-          import json
-          c=json.load(open('out-a.json'))
-          assert c['bomFormat']=='CycloneDX' and c['specVersion']=='1.6'
-          assert c['serialNumber'].startswith('urn:uuid:')
-          for x in c['components']:
-              assert x['type']=='cryptographic-asset'
-              assert 'cryptoProperties' in x
-          print('OK: CycloneDX 1.6 con cryptographic-asset')
-          PY
-
-      - name: Caso 4 — fail-on-findings corta el pase
-        run: |
-          if node readiness-scan/scan.mjs --path=readiness-scan/test/fixtures/vulnerable --output=out-c.json --fail-on-findings=true; then
-            echo "ERROR: debió salir con código != 0"; exit 1
-          fi
-          echo "OK: fail-on-findings funciona"

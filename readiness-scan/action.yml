@@ -1,6 +1,6 @@
 name: 'PQC Readiness Scan (CBOM)'
 description: 'Find the quantum-vulnerable cryptography in your repo and emit a CycloneDX CBOM. NIST deprecates these algorithms after 2030 and disallows them after 2035.'
-author: 'FractalAI'
+author: 'FRACTAL AI S.A.S.'
 branding:
   icon: 'shield'
   color: 'purple'
@@ -18,12 +18,16 @@ inputs:
     required: false
     default: 'false'
   seal:
-    description: 'Optional. Set to true to also request an ML-DSA-65 (FIPS 204) signature over the CBOM from FractalAI. Costs USDC over x402 and is NEVER required: the scan and the CBOM are free and run entirely in your runner.'
+    description: >-
+      PREVIEW, not yet usable from this Action. It would request an ML-DSA-65 (FIPS 204) signature
+      over a redacted copy of the CBOM from FractalAI. The endpoint answers 402 Payment Required and
+      this Action carries no x402 payment client, so today setting this only prints the price and
+      what would be sent. The scan and the CBOM are free and always run entirely in your runner.
     required: false
     default: 'false'
 outputs:
   findings:
-    description: 'Number of quantum-vulnerable cryptographic assets found.'
+    description: 'Total number of quantum-vulnerable occurrences found (occurrences, not distinct algorithms).'
     value: ${{ steps.scan.outputs.findings }}
   cbom:
     description: 'Path to the generated CBOM.'

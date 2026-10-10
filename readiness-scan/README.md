@@ -4,10 +4,18 @@
 One line in your workflow. Free. Runs entirely in your runner — nothing is uploaded.
 
 ```yaml
-- uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2
+- uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2.1.0
 ```
 
-That's it. The scan writes `cbom.json` and prints an inventory in your job summary.
+That's it.
+
+For a tool whose whole pitch is that nothing leaves your runner, pin the commit rather than the
+tag — a tag can be moved, a SHA cannot. This action has no dependencies at all: three Node
+built-ins and one file, so the SHA is the entire trust boundary.
+
+```yaml
+- uses: johnInarti/pqc-receipt-verify-action/readiness-scan@<full-40-char-sha>  # v2.1.0
+``` The scan writes `cbom.json` and prints an inventory in your job summary.
 
 ---
 
@@ -40,6 +48,10 @@ Stated plainly, because an inventory you can't trust is worse than none:
   recognise. Zero findings means "nothing matched", not "you are safe".
 - **Not a compliance certification.** It is evidence to start a migration from, not a
   clean bill of health, and no auditor should treat it as one.
+- **It skips some directories by default**, including `vendor`, `node_modules`, `dist`,
+  `build`, `target` and `out`. A project whose cryptography lives in vendored code will get a
+  clean-looking report. Every CBOM states which directory names were skipped, and the
+  occurrence count is the true total even when only the first 25 locations are listed.
 - **Not a secret collector.** It reads your files in your runner and uploads nothing.
   There is no account, no API key, and no telemetry. Read `scan.mjs` — it is one file.
 
@@ -54,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2
+      - uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2.1.0
         id: pqc
       - uses: actions/upload-artifact@v4
         with:
@@ -81,30 +93,41 @@ jobs:
 ### Gate a repository once you are ready
 
 ```yaml
-      - uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2
+      - uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2.1.0
         with:
           fail-on-findings: true
 ```
 
-## Optional: a signed, verifiable inventory
+## Optional: a signed inventory — preview, not yet usable
 
-The scan and the CBOM are free forever. If you need a **third party** to verify that a
-given inventory was produced at a given time and was not edited afterwards, set
-`seal: true`. FractalAI signs the CBOM's canonical hash with **ML-DSA-65 (NIST FIPS 204,
+The scan and the CBOM are free forever and that is the whole product today. The rest of this
+section describes something you **cannot yet buy**, and we would rather say so here than let
+you find a `402 Payment Required` in your own CI log.
+
+The intent: if you need a **third party** to verify that a given inventory was produced at a
+given time and was not edited afterwards, FractalAI signs it with **ML-DSA-65 (NIST FIPS 204,
 security level 3)** and returns a re-verifiable certificate.
 
-```yaml
-      - uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2
-        with:
-          seal: true
-```
+The honest state of it:
 
-That request is paid in USDC over [x402](https://x402.org) and costs you nothing unless
-you choose it: without payment the endpoint answers `402 Payment Required` and the scan
-above is unaffected.
+- The endpoint is live and prices the request in USDC over [x402](https://x402.org).
+- **This Action carries no x402 payment client.** There is no key input and no payment step, so
+  the endpoint always answers `402 Payment Required` and no seal is ever produced.
+- Setting `seal: true` today therefore only prints the price and exactly what would be sent. It
+  changes nothing about the scan, which already ran and already wrote your CBOM.
 
-**Verification is free, open, and offline.** A seal is a plain ML-DSA-65 signature, so any
-FIPS 204 implementation verifies it — you never pay us to check our own work, and you never
+**What would leave your runner, precisely.** Not the CBOM you have on disk. Every
+`fractalai:location` property is stripped first, so no `path/to/file.ts:LINE` from your
+repository crosses the wire. What would be sent is the algorithm families, their occurrence
+counts, and the file count. No file contents, no code snippets, no secret values, no repository
+or organisation name, no identifier of you or your runner. The exact redacted document is
+written next to the CBOM so you can read, diff and keep what was sent.
+
+If your repository paths are confidential, that is already handled, and with the default
+`seal: false` the process opens **zero** network connections of any kind.
+
+**Verification would be free, open and offline.** A seal is a plain ML-DSA-65 signature, so any
+FIPS 204 implementation verifies it. You would never pay us to check our own work, and never
 run our code to do it:
 
 ```js
@@ -119,14 +142,14 @@ const ok = ml_dsa65.verify(
 );
 ```
 
-The public key travels with the seal, so verification needs no network at all. To confirm
-the key is ours and not substituted, compare it against the one we serve free at
+The public key travels with the seal, so verification needs no network at all. To confirm the
+key is ours and not substituted, compare it against the one we serve free at
 `https://fractalai.net.co/api/x402/receipt-key`.
 
-**One honest limit:** the public-key directory that lets you resolve our signing key is
-served over TLS and is **not yet anchored on-chain**. Verifying a seal therefore means
-trusting that TLS endpoint for the key, and the cryptography for everything after. We say
-so here rather than let you discover it in an audit.
+**One honest limit beyond that:** the public-key directory that lets you resolve our signing key
+is served over TLS and is **not yet anchored on-chain**. Verifying a seal therefore means
+trusting that TLS endpoint for the key, and the cryptography for everything after. We say so
+here rather than let you discover it in an audit.
 
 ## Security posture
 
@@ -165,4 +188,5 @@ make this better for everyone.
 
 ## License
 
-MIT. Use it, fork it, vendor it, sell services on top of it.
+Apache-2.0, the same licence as the rest of this repository. See [`LICENSE`](../LICENSE).
+Use it, fork it, vendor it, sell services on top of it.
