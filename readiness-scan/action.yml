@@ -1,52 +1,112 @@
 name: 'PQC Readiness Scan (CBOM)'
-description: 'Find the quantum-vulnerable cryptography in your repo and emit a CycloneDX CBOM. NIST deprecates these algorithms after 2030 and disallows them after 2035.'
+description: 'Moved. This forwards to johnInarti/pqc-readiness-action, which is the same action at the root of its own repository.'
 author: 'FRACTAL AI S.A.S.'
 branding:
   icon: 'shield'
   color: 'purple'
+
+# Esta copia MOVIÓ. La acción vive ahora en la raíz de su propio repositorio público,
+# johnInarti/pqc-readiness-action, por dos razones: la línea `uses:` es más corta y, sobre todo, el
+# Marketplace de GitHub solo lista UNA acción por repositorio y tiene que estar en la raíz, así que
+# una acción en subdirectorio no se puede listar nunca.
+#
+# Esto NO se borra, se convierte en un REENVÍO. Quien ya escribió la línea antigua en su workflow
+# sigue funcionando y recibe las mejoras, en vez de encontrarse un "Unable to resolve action" un
+# lunes por la mañana. Y al reenviar en vez de duplicar el código, deja de existir una segunda
+# copia que se queda atrás en silencio: una sola fuente de verdad.
+#
+# Línea recomendada para repositorios nuevos:
+#   - uses: johnInarti/pqc-readiness-action@v1
+
 inputs:
   path:
     description: 'Directory to scan.'
     required: false
     default: '.'
   output:
-    description: 'Where to write the CycloneDX CBOM. Must stay inside the workspace.'
+    description: 'Where to write the CycloneDX CBOM.'
     required: false
     default: 'cbom.json'
+  sarif:
+    description: 'Where to write the SARIF 2.1.0 report. Empty string to skip.'
+    required: false
+    default: 'pqc.sarif'
+  upload-sarif:
+    description: 'Upload the SARIF to GitHub code scanning. Needs security-events: write.'
+    required: false
+    default: 'true'
+  baseline:
+    description: 'Baseline file with the frozen occurrence count per algorithm family.'
+    required: false
+    default: ''
+  write-baseline:
+    description: 'Write or overwrite the baseline from this run.'
+    required: false
+    default: 'false'
+  fail-on-increase:
+    description: 'Fail only when an algorithm family goes up against the baseline.'
+    required: false
+    default: 'false'
+  report:
+    description: 'Where to write the human-readable Markdown report.'
+    required: false
+    default: ''
+  comment-on-pr:
+    description: 'Keep one comment updated on the pull request. Needs pull-requests: write.'
+    required: false
+    default: 'false'
   fail-on-findings:
-    description: 'Exit non-zero if quantum-vulnerable cryptography is found. Default false: this is an inventory, not a gate.'
+    description: 'Fail if any quantum-vulnerable cryptography is found at all.'
     required: false
     default: 'false'
   seal:
-    description: >-
-      PREVIEW, not yet usable from this Action. It would request an ML-DSA-65 (FIPS 204) signature
-      over a redacted copy of the CBOM from FractalAI. The endpoint answers 402 Payment Required and
-      this Action carries no x402 payment client, so today setting this only prints the price and
-      what would be sent. The scan and the CBOM are free and always run entirely in your runner.
+    description: 'PREVIEW, not usable from this Action. See the upstream README.'
     required: false
     default: 'false'
+  token:
+    description: 'Token used only for the SARIF upload and the pull-request comment.'
+    required: false
+    default: ${{ github.token }}
+
 outputs:
   findings:
-    description: 'Total number of quantum-vulnerable occurrences found (occurrences, not distinct algorithms).'
-    value: ${{ steps.scan.outputs.findings }}
+    description: 'Total quantum-vulnerable occurrences found in code.'
+    value: ${{ steps.forward.outputs.findings }}
   cbom:
     description: 'Path to the generated CBOM.'
-    value: ${{ steps.scan.outputs.cbom }}
+    value: ${{ steps.forward.outputs.cbom }}
+  sarif:
+    description: 'Path to the generated SARIF report.'
+    value: ${{ steps.forward.outputs.sarif }}
+  increased:
+    description: 'Families that went up against the baseline.'
+    value: ${{ steps.forward.outputs.increased }}
+  decreased:
+    description: 'Families that went down against the baseline.'
+    value: ${{ steps.forward.outputs.decreased }}
+  truncated:
+    description: 'true when the scan could not read everything.'
+    value: ${{ steps.forward.outputs.truncated }}
+
 runs:
   using: 'composite'
   steps:
-    # Every input reaches the scanner through the ENVIRONMENT, never interpolated into this
-    # shell script. That is not style: `run: node x --path="${{ inputs.path }}"` lets the
-    # runner paste the raw input text into the script BEFORE bash parses it, so any workflow
-    # that wires an input from a pull-request title, an issue body or a dispatch field hands
-    # command execution to whoever wrote that text, with the job's secrets in scope. Values
-    # passed via `env:` are never re-parsed by bash, so the same payload stays inert data.
-    - id: scan
-      shell: bash
-      env:
-        PQC_ACTION_PATH: ${{ github.action_path }}
-        PQC_PATH: ${{ inputs.path }}
-        PQC_OUTPUT: ${{ inputs.output }}
-        PQC_FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
-        PQC_SEAL: ${{ inputs.seal }}
-      run: node "$PQC_ACTION_PATH/scan.mjs"
+    - shell: bash
+      run: |
+        echo "::notice title=PQC Readiness Scan moved::This action now lives at johnInarti/pqc-readiness-action. Your workflow keeps working through a forwarder, but switch the uses: line to 'johnInarti/pqc-readiness-action@v1' when convenient."
+
+    - id: forward
+      uses: johnInarti/pqc-readiness-action@v1
+      with:
+        path: ${{ inputs.path }}
+        output: ${{ inputs.output }}
+        sarif: ${{ inputs.sarif }}
+        upload-sarif: ${{ inputs.upload-sarif }}
+        baseline: ${{ inputs.baseline }}
+        write-baseline: ${{ inputs.write-baseline }}
+        fail-on-increase: ${{ inputs.fail-on-increase }}
+        report: ${{ inputs.report }}
+        comment-on-pr: ${{ inputs.comment-on-pr }}
+        fail-on-findings: ${{ inputs.fail-on-findings }}
+        seal: ${{ inputs.seal }}
+        token: ${{ inputs.token }}

@@ -181,18 +181,19 @@ Copyright 2026 FRACTAL AI S.A.S. Contact: softnextceo@gmail.com · https://fract
 
 ---
 
-## Also in this repo: PQC Readiness Scan
+## PQC Readiness Scan has moved to its own repository
 
-A second, independent Action that scans **any** repository for quantum-vulnerable
-cryptography and emits a CycloneDX 1.6 CBOM. Free, runs entirely in your runner, uploads
-nothing, needs no account.
+The second action in this repository, which scans any repository for quantum-vulnerable
+cryptography and emits a CycloneDX CBOM, now lives at the root of
+**[johnInarti/pqc-readiness-action](https://github.com/johnInarti/pqc-readiness-action)**:
 
 ```yaml
-- uses: johnInarti/pqc-receipt-verify-action/readiness-scan@v2
+- uses: johnInarti/pqc-readiness-action@v1
 ```
 
-NIST IR 8547 deprecates RSA, ECDSA, ECDH, DH and DSA after 2030 and disallows them after
-2035. The first deliverable of every migration is knowing where those algorithms live.
-See [`readiness-scan/README.md`](readiness-scan/README.md) for inputs, outputs and the
-explicit limits of a static scan, and [`CHANGELOG.md`](CHANGELOG.md) for what changed in which
-Action: the two share one tag namespace, so every entry says which one moved.
+The `uses:` line is shorter, and the GitHub Marketplace lists only one action per repository and
+only from its root, so a subdirectory action can never appear there.
+
+The old path still works. `readiness-scan/` keeps a forwarder with the same inputs and outputs, so
+a workflow already pinned to `…/readiness-scan@v2.1.0` keeps running and keeps receiving
+improvements. See [`readiness-scan/README.md`](readiness-scan/README.md).
